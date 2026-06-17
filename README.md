@@ -85,10 +85,17 @@ inspectable, editable, and shareable across the fleet.
 
 ## Install / run
 
-```bash
-# build from source (no toolchain tricks; CGo not required)
-go build -o deskclaw .        # or: make build
+Prebuilt — one line, auto-detects your OS/CPU (macOS · Windows · Linux-stub):
 
+```sh
+curl -fsSL https://github.com/DureClaw/deskclaw/releases/latest/download/install.sh | sh
+```
+
+Or grab a binary from **[Releases](https://github.com/DureClaw/deskclaw/releases/latest)**
+(darwin/windows `amd64`·`arm64`, linux `amd64`; SHA256SUMS attached), or build from source:
+`go build -o deskclaw .` (CGo not required) / `make build`.
+
+```bash
 STATE_SERVER=<bus-host:4000> OAH_SECRET=<token> WORK_KEY=<WK> \
   AGENT_NAME=deskclaw@$(hostname) \
   BRAIN_URL=http://<master>:4111 BRAIN_TOKEN=<tok> \
