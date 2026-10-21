@@ -1,0 +1,8 @@
+{
+  "verb": "SAY",
+  "description": "speak text aloud (macOS say) — minimal plugin example",
+  "command": ["say"],
+  "os": ["darwin"],
+  "timeout_sec": 30,
+  "record": true
+}

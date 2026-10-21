@@ -35,6 +35,9 @@ No native-linked libraries. deskclaw shells out to what each OS already ships:
 | **Windows** | PowerShell `System.Drawing` ✅ | user32 P/Invoke ✅ built-in | `SendKeys` ✅ built-in |
 
 Same one-file install story as edgeclaw; Windows needs **zero** extra installs.
+On macOS, element-level control (`[AX]`, app adapters, the on-screen indicator) uses a small
+Swift helper whose source is **embedded in the binary** and compiled once with `swiftc`
+(Xcode Command Line Tools) into the user cache dir.
 
 ## Task verbs (over the bus)
 
@@ -51,6 +54,9 @@ A master fans out a `task.assign` with one of these instructions:
 | `[SCROLL] x y amount up\|down` | scroll wheel (Windows; macOS MVP: use `[KEY] pagedown`) |
 | `[RECORD] <name>` … `[ENDREC]` | **record** the actions in between into a named macro |
 | `[RUN] <name>` · `[MACROS]` | **replay** a macro deterministically (no LLM) · list macros |
+| `[AX] apps\|tree\|find\|text\|press\|set …` | **any app, by element** (macOS Accessibility) — see below |
+| `[KAKAO] rooms\|unread\|triage\|read\|send …` · `[APPS]` | **built-in app adapter** (KakaoTalk) · list adapters |
+| `[<VERB>] …` · `[PLUGINS]` | run a **plugin** (an external CLI registered by manifest) · list plugins |
 | *(anything else)* | delegate to the **master brain** (`BRAIN_URL`/brain/exec), keyless |
 
 The intended loop: master sends `[SCREENSHOT]` → grounds the image with vision → sends
@@ -80,8 +86,98 @@ Verified end-to-end on macOS: record `[LAUNCH]` → save → `[RUN]` re-launches
 calls**. Macros are plain JSON under `DESK_MACRO_DIR` (default OS config dir), so they're
 inspectable, editable, and shareable across the fleet.
 
-> MVP records coordinate-based steps; **element-targeting via the accessibility tree**
-> (UIAutomation / AX) is the planned robustness upgrade so macros survive window moves.
+> Coordinate steps (`[CLICK] x y`) break when a window moves; on macOS record with
+> `[AX] press/set` instead — element-targeted steps survive moves (see below).
+
+## Any app, by element — `[AX]` (macOS)
+
+Pixel clicks break when a window moves. `[AX]` drives **any** app through the macOS
+Accessibility API by *element* — role, title, description, value — and reads the UI as
+text, so the master often doesn't need a screenshot at all.
+
+```
+[AX] apps                                   running GUI apps
+[AX] tree  Safari --depth 8 --max 80        element tree: path role "label"
+[AX] find  Calculator "role=AXButton"       matches with path + screen frame
+[AX] text  Notes                            readable text of the windows (or under a match)
+[AX] press Calculator "role=AXButton 등호"   press button/menu/row (falls back to a real click)
+[AX] set   Safari "role=AXTextField" "dureclaw"   fill a field, verified by read-back
+```
+
+`<app>` is a name (localized or bundle file name — `Calculator` finds 계산기), bundle id or
+pid. A query is words the label must contain, plus `role=` `title=` `desc=` `value=`
+(exact) / `title~` `desc~` `value~` (contains), `#2` (2nd match), `path=0.1.3` (from tree).
+Options: `--depth` `--max` `--rows` `--tail` `--window <title>` `--menus` `--no-activate`.
+
+`[AX] press` / `set` are **recorded into RPA macros** — element-targeted, so replays survive
+window moves (verified: record 7 + 5 = on Calculator → `[RUN]` → 12, no LLM).
+The Swift helper is embedded in the binary and built once with `swiftc` (Xcode Command
+Line Tools) into the user cache dir. Windows UIAutomation is the next backend.
+
+## Built-in app adapters — `[KAKAO]`, …
+
+`[AX]` is the universal layer; an **app adapter** is deskclaw knowing *one* app well — which
+window/table holds what, how to parse rows into rooms/messages, how to verify an action
+really happened. Adapters are compiled in (`app_<name>.go` → `registerApp` in `init()`), so
+they ship in the single binary and get help, the on-screen indicator and the confirm guard
+for free. `[APPS]` lists them.
+
+**KakaoTalk (macOS)** — ported from the `kax` + `kakao.py` tool:
+
+```
+[KAKAO] rooms -n 30              chat list (does not open rooms)
+[KAKAO] unread -n 60             rooms with unread messages
+[KAKAO] triage -n 60             unread + category / needs_reply / urgency (Jev, else rules)
+[KAKAO] read "방 이름" -n 20      open the room → recent messages (clears the '1' for the sender)
+[KAKAO] send "방 이름" "내용"      dry-run — prints what would be sent
+[KAKAO] send "방 이름" "내용" --yes   real send, verified (input cleared + text in the latest rows)
+```
+
+Add `--json` for machine output. Measured: room open + read 1.4 s, re-read 0.17 s, list of
+60 rooms ≈ 2.5 s. `triage` uses **Jev** (TypeSafe System One) when `TYPESAFE_API_KEY` is
+set, otherwise rules. KakaoTalk only exposes windows while frontmost, so it comes to the
+front during a command. Its terms restrict automation — no bulk sends or tight polling.
+
+**Confirm guard:** an adapter's confirm flag (`--yes`) acts on the real world, so it's
+refused unless the **node** opts in with `DESK_ALLOW_CONFIRM=KAKAO` — a remote master can't.
+
+## Plugins — any external CLI as a verb
+
+For tools you'd rather not compile in (an ERP export script, a CRM CLI…), drop a manifest
+into `DESK_PLUGIN_DIR` (default `~/Library/Application Support/deskclaw/plugins` on macOS,
+`%AppData%\deskclaw\plugins` on Windows) — no rebuild:
+
+```json
+{
+  "verb": "REPORT",
+  "description": "monthly ERP export",
+  "command": ["python3", "/abs/path/erp_export.py"],
+  "os": ["darwin", "windows"],
+  "subcommands": ["list", "export"],
+  "front_flags": ["--json"],
+  "confirm_flag": "--yes",
+  "allow_confirm": false,
+  "timeout_sec": 120,
+  "record": false,
+  "overlay": true
+}
+```
+
+`[REPORT] export "2026-10"` runs `python3 erp_export.py export 2026-10` (quotes group args;
+`front_flags` are hoisted before the subcommand). A `confirm_flag` arg is refused unless the
+node's manifest says `allow_confirm: true`. `record: true` lets steps join RPA macros;
+`overlay: true` shows the on-screen indicator. `[PLUGINS]` reloads and lists. Minimal example:
+[`plugins/say.json.example`](plugins/say.json.example).
+
+## On-screen indicator
+
+Whenever deskclaw drives the GUI — pointer/keyboard verbs, `[AX]`, `[RUN]` replays, app
+adapters — the person at the machine sees a **blinking orange border and a top banner**
+("Claude Computer Use 실행 중 · deskclaw (<agent>) — 마우스·키보드를 건드리지 마세요"). It
+never takes focus and lets clicks through. Steps from a master share one indicator that
+lingers 3 s after the last step (no flicker), and it's dropped right before `[SCREENSHOT]`
+so it never shows up in the image the master's vision reads. It exits by itself if deskclaw
+dies or after 180 s. macOS today; `DESK_OVERLAY=0` turns it off, `--no-overlay` skips one task.
 
 ## Install / run
 
@@ -115,6 +211,12 @@ STATE_SERVER=<bus-host:4000> OAH_SECRET=<token> WORK_KEY=<WK> \
 | `DESK_SHOT_DIR` | where screenshots are saved (default: temp dir) |
 | `DESK_SHOT_B64` | inline screenshots as base64 data URLs in the result |
 | `DESK_MACRO_DIR` | where recorded RPA macros are stored (default: OS config dir `…/deskclaw/macros`) |
+| `DESK_PLUGIN_DIR` | plugin manifests (default: OS config dir `…/deskclaw/plugins`) |
+| `DESK_AX_HELPER` | use a prebuilt axhelper binary instead of compiling the embedded one |
+| `DESK_MAX_OUTPUT` | max chars of a task result sent back to the bus (default 4000) |
+| `DESK_ALLOW_CONFIRM` | adapters allowed to act for real, e.g. `KAKAO` (enables `[KAKAO] send … --yes`) |
+| `DESK_OVERLAY` | `0` disables the on-screen "computer use running" indicator |
+| `TYPESAFE_API_KEY` / `TYPESAFE_MODEL` | Jev for adapter judgments (e.g. `[KAKAO] triage`); rules otherwise |
 
 ## Status
 
@@ -124,8 +226,7 @@ macro → `[RUN]` replays it with **zero LLM calls**. Pointer/keyboard verbs imp
 macOS (osascript + optional cliclick) and Windows (PowerShell, fully built-in); cross-builds
 clean for darwin + windows (amd64/arm64). Linux is a join-only stub (X11/Wayland backend TBD).
 
-> Roadmap: **accessibility-tree targeting** (UIAutomation / AX) so macros hit *elements* not
-> pixels and survive window moves · screenshot→brain upload loop · macro parameters/variables ·
+> Roadmap: **Windows UIAutomation** backend for `[AX]` · screenshot→brain upload loop · macro parameters/variables ·
 > `[WAIT]`/`[FINDTEXT]` guards · Linux backend.
 
 ---

@@ -23,22 +23,24 @@ import (
 	"strings"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 )
 
 // ── config (env) ────────────────────────────────────────────────────────────
 var (
-	stateServer = env("STATE_SERVER", "127.0.0.1:4000")
-	secret      = env("OAH_SECRET", "")
-	workKey     = env("WORK_KEY", "WK-demo")
-	agentName   = env("AGENT_NAME", "deskclaw@"+hostname())
-	agentRole   = env("AGENT_ROLE", "executor")
-	machine     = env("AGENT_MACHINE", hostname())
-	brainURL    = env("BRAIN_URL", "")
-	brainToken  = env("BRAIN_TOKEN", "")
-	caps        = splitCSV(env("CAPABILITIES", "desktop,gui,screenshot,click,type,key,launch,rpa"))
-	shotDir     = env("DESK_SHOT_DIR", filepath.Join(os.TempDir(), "deskclaw-shots"))
+	stateServer  = env("STATE_SERVER", "127.0.0.1:4000")
+	secret       = env("OAH_SECRET", "")
+	workKey      = env("WORK_KEY", "WK-demo")
+	agentName    = env("AGENT_NAME", "deskclaw@"+hostname())
+	agentRole    = env("AGENT_ROLE", "executor")
+	machine      = env("AGENT_MACHINE", hostname())
+	brainURL     = env("BRAIN_URL", "")
+	brainToken   = env("BRAIN_TOKEN", "")
+	caps         = splitCSV(env("CAPABILITIES", "desktop,gui,screenshot,click,type,key,launch,rpa"))
+	shotDir      = env("DESK_SHOT_DIR", filepath.Join(os.TempDir(), "deskclaw-shots"))
+	maxOutput, _ = strconv.Atoi(env("DESK_MAX_OUTPUT", "4000"))
 )
 
 var (
@@ -58,7 +60,21 @@ func joinRef() any {
 func main() {
 	log.SetFlags(log.Ltime)
 	_ = os.MkdirAll(shotDir, 0o755)
+	if maxOutput <= 0 {
+		maxOutput = 4000
+	}
 	log.Printf("[deskclaw] %s (role=%s, os=%s) → bus %s work:%s", agentName, agentRole, guiOS(), stateServer, workKey)
+	if axSupported() {
+		caps = append(caps, "ax")
+	}
+	for _, v := range appVerbs() {
+		caps = append(caps, strings.ToLower(strings.Trim(v, "[]")))
+	}
+	loadPlugins()
+	for _, v := range pluginVerbs() {
+		caps = append(caps, strings.ToLower(strings.Trim(v, "[]")))
+	}
+	log.Printf("[deskclaw] plugins: %v (dir %s)", pluginVerbs(), pluginDir())
 	if !guiSupported() {
 		log.Printf("[deskclaw] ⚠️  GUI control not implemented on this OS — node joins but GUI verbs return an error")
 	}
@@ -157,7 +173,7 @@ func handle(c *websocket.Conn, p taskPayload) {
 	}
 	send(c, []any{joinRef(), nextRef(), "work:" + workKey, "task.result", map[string]any{
 		"task_id": p.TaskID, "to": from, "from": agentName,
-		"status": status, "output": clip(out, 1800), "exit_code": code, "backend": "deskclaw",
+		"status": status, "output": clip(out, maxOutput), "exit_code": code, "backend": "deskclaw",
 	}})
 	log.Printf("[deskclaw] result %s: %s", p.TaskID, status)
 }
@@ -170,6 +186,11 @@ func handle(c *websocket.Conn, p taskPayload) {
 func runTask(instr string) (string, int) {
 	t := strings.TrimSpace(instr)
 	verb, rest := splitVerb(t)
+	if verb == "[SCREENSHOT]" {
+		overlayDrop() // keep the indicator out of the image the master's vision reads
+	} else if drivesGUI(verb, rest) && !strings.Contains(rest, "--no-overlay") {
+		defer overlayHold()()
+	}
 	switch verb {
 	// ── RPA control (not recorded) ──
 	case "[RECORD]":
@@ -194,19 +215,24 @@ func runTask(instr string) (string, int) {
 		return listMacros(), 0
 	case "[SCREENSHOT]":
 		return doScreenshot(rest)
+	case "[PLUGINS]":
+		return listPlugins(), 0
+	case "[APPS]":
+		return listApps(), 0
 
 	// ── action verbs (captured while recording) ──
 	case "[LAUNCH]", "[CLICK]", "[DOUBLECLICK]", "[RIGHTCLICK]", "[MOVE]", "[TYPE]", "[KEY]", "[SCROLL]":
-		out, code := execVerb(verb, rest)
-		if code == 0 {
-			recordStep(verb, rest)
-		}
-		if code == 0 && isRecording() {
-			out += " [rec]"
-		}
-		return out, code
+		return execAndRecord(verb, rest, true)
+	case "[AX]":
+		return execAndRecord(verb, rest, axIsAction(rest))
 
 	default:
+		if a := appAdapters[verb]; a != nil {
+			return runApp(a, rest)
+		}
+		if p := lookupPlugin(verb); p != nil {
+			return execAndRecord(verb, rest, p.Record)
+		}
 		if brainURL != "" { // keyless: master brings the brain
 			out, err := brainExec(instr)
 			if err != nil {
@@ -216,6 +242,19 @@ func runTask(instr string) (string, int) {
 		}
 		return helpText() + " echo: " + instr, 0
 	}
+}
+
+// execAndRecord runs an action and, when it's a recordable step, captures it into the
+// active macro.
+func execAndRecord(verb, rest string, recordable bool) (string, int) {
+	out, code := execVerb(verb, rest)
+	if code == 0 && recordable {
+		recordStep(verb, rest)
+		if isRecording() {
+			out += " [rec]"
+		}
+	}
+	return out, code
 }
 
 // execVerb runs ONE GUI action — shared by live handling and deterministic macro replay.
@@ -243,6 +282,11 @@ func execVerb(verb, rest string) (string, int) {
 		return "key " + strings.TrimSpace(rest), 0
 	case "[SCROLL]":
 		return doScroll(rest)
+	case "[AX]":
+		return doAX(rest)
+	}
+	if p := lookupPlugin(verb); p != nil {
+		return runPlugin(verb, p, rest)
 	}
 	return "unknown verb " + verb, 1
 }
@@ -250,7 +294,9 @@ func execVerb(verb, rest string) (string, int) {
 func helpText() string {
 	return "[deskclaw] eyes/hands: [SCREENSHOT] [LAUNCH app] [CLICK x y] [DOUBLECLICK x y] " +
 		"[RIGHTCLICK x y] [MOVE x y] [TYPE text] [KEY combo] [SCROLL x y amount up|down] · " +
-		"RPA: [RECORD name] … [ENDREC] then [RUN name] · [MACROS]."
+		"RPA: [RECORD name] … [ENDREC] then [RUN name] · [MACROS] · " +
+		"Any app by element (macOS): [AX] apps|tree|find|text|press|set · " +
+		"built-in apps: [APPS] (e.g. [KAKAO]) · plugins: [PLUGINS]."
 }
 
 func doScreenshot(arg string) (string, int) {
@@ -391,8 +437,18 @@ func splitCSV(s string) []string {
 func hostname() string { h, _ := os.Hostname(); return h }
 
 func clip(s string, n int) string {
-	if len(s) > n {
-		return s[:n]
+	if len(s) <= n {
+		return s
 	}
-	return s
+	for n > 0 && !utf8.RuneStart(s[n]) { // don't split a multi-byte (e.g. Korean) rune
+		n--
+	}
+	return s[:n]
+}
+
+func firstNonEmpty(a, b string) string {
+	if a != "" {
+		return a
+	}
+	return b
 }
