@@ -16,7 +16,9 @@ package main
 import (
 	"encoding/json"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 )
 
 var axCmds = []string{"apps", "tree", "find", "text", "press", "set"}
@@ -28,6 +30,23 @@ func doAX(rest string) (string, int) {
 	}
 	if len(args) == 0 || !slices.Contains(axCmds, args[0]) {
 		return "[AX] apps | tree <app> | find <app> <query> | text <app> [query] | press <app> <query> | set <app> <query> <value>", 1
+	}
+	// press/set: show the options, the pick and a virtual cursor first, then act on exactly
+	// the element that was shown (by path)
+	if (args[0] == "press" && len(args) >= 3) || (args[0] == "set" && len(args) >= 4) {
+		valueAt := 3
+		if args[0] == "set" {
+			valueAt = 4
+		}
+		opts := args[valueAt:]
+		if path, cx, cy, ok := visTarget(args[1], args[2], opts); ok {
+			args = slices.Clone(args)
+			args[2] = "path=" + path
+			if args[0] == "set" {
+				visCaption("⌨ 입력: " + clip(args[3], 40))
+			}
+			defer visClick(cx, cy)
+		}
 	}
 	out, err := axRun(args)
 	if err != nil {
@@ -52,7 +71,16 @@ type axNode struct {
 }
 
 func axDump(args ...string) ([]axNode, error) {
-	out, err := axRun(append([]string{"dump"}, args...))
+	// budget by requested rows: big tables (chat history) take ~50ms per row
+	timeout := 60 * time.Second
+	for i, a := range args {
+		if a == "--rows" && i+1 < len(args) {
+			if n, err := strconv.Atoi(args[i+1]); err == nil {
+				timeout += time.Duration(n) * 100 * time.Millisecond
+			}
+		}
+	}
+	out, err := axRunFor(timeout, append([]string{"dump"}, args...))
 	if err != nil {
 		return nil, err
 	}

@@ -25,7 +25,12 @@ func guiLaunch(app string) error {
 		return fmt.Errorf("launch needs an app name or path")
 	}
 	// path → open it; otherwise treat as an app name (open -a).
-	if strings.HasPrefix(app, "/") || strings.HasPrefix(app, ".") || strings.HasPrefix(app, "~") {
+	if strings.HasPrefix(app, "~") {
+		if home, err := os.UserHomeDir(); err == nil {
+			app = home + app[1:]
+		}
+	}
+	if strings.HasPrefix(app, "/") || strings.HasPrefix(app, ".") {
 		return runErr("open", app)
 	}
 	return runErr("open", "-a", app)

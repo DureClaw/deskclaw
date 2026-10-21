@@ -9,8 +9,8 @@
 //	[APPS]                       list built-in adapters
 //
 // Confirm guard: an arg equal to the adapter's confirmFlag (e.g. --yes on a send) acts on
-// the real world, so it is refused unless the NODE opts in: DESK_ALLOW_CONFIRM=KAKAO,…
-// A remote master can't flip that.
+// the real world, so it is refused unless the NODE opts in: DESK_ALLOW_CONFIRM=KAKAO,… or the
+// person at the machine approves it in the DeskClaw app (ui.go). A remote master can't.
 package main
 
 import (
@@ -85,12 +85,15 @@ func runApp(a *appAdapter, rest string) (string, int) {
 		return a.usage(), 1
 	}
 	sub, args := args[0], args[1:]
-	if a.confirmFlag != "" && slices.Contains(args, a.confirmFlag) && !confirmAllowed(a.verb) {
-		return fmt.Sprintf("%s %s %s refused — this node hasn't opted in (DESK_ALLOW_CONFIRM=%s); drop %s for a dry-run",
+	if a.confirmFlag != "" && slices.Contains(args, a.confirmFlag) && !confirmAllowed(a.verb) &&
+		!uiApprove(a.verb+" "+rest) {
+		return fmt.Sprintf("%s %s %s refused — not approved on this node (approve in DeskClaw, or DESK_ALLOW_CONFIRM=%s); drop %s for a dry-run",
 			a.verb, sub, a.confirmFlag, strings.Trim(a.verb, "[]"), a.confirmFlag), 1
 	}
-	if i := slices.Index(args, "--no-overlay"); i >= 0 { // overlay itself is handled in runTask
-		args = slices.Delete(args, i, i+1)
+	for _, flag := range []string{"--no-overlay", "--keep-windows"} { // handled in runTask
+		if i := slices.Index(args, flag); i >= 0 {
+			args = slices.Delete(args, i, i+1)
+		}
 	}
 	out, err := a.run(sub, args)
 	if err != nil {

@@ -65,12 +65,15 @@ func axHelper() (string, error) {
 	return axBin, axErr
 }
 
-func axRun(args []string) (string, error) {
+func axRun(args []string) (string, error) { return axRunFor(60*time.Second, args) }
+
+// axRunFor is axRun with an explicit timeout — e.g. dumping thousands of chat rows (~50ms/row).
+func axRunFor(timeout time.Duration, args []string) (string, error) {
 	bin, err := axHelper()
 	if err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var stderr strings.Builder
 	cmd := exec.CommandContext(ctx, bin, args...)
@@ -84,18 +87,23 @@ func axRun(args []string) (string, error) {
 
 // axOverlay shows the "automation running" border+banner until the returned stop is called
 // (the helper also exits by itself when deskclaw dies or after 180s). Never blocks the task.
-func axOverlay(message string) (stop func()) {
+// send writes one visual-layer command line (virtual cursor, highlights) to the overlay.
+func axOverlay(message string) (stop func(), send func([]byte)) {
 	bin, err := axHelper()
 	if err != nil {
-		return func() {}
+		return func() {}, nil
 	}
 	cmd := exec.Command(bin, "overlay", message, "180")
-	if cmd.Start() != nil {
-		return func() {}
+	in, err := cmd.StdinPipe()
+	if err != nil || cmd.Start() != nil {
+		return func() {}, nil
 	}
 	time.Sleep(150 * time.Millisecond) // let the first frame draw
 	return func() {
-		_ = cmd.Process.Signal(os.Interrupt)
-		_ = cmd.Wait()
-	}
+			_ = in.Close()
+			_ = cmd.Process.Signal(os.Interrupt)
+			_ = cmd.Wait()
+		}, func(b []byte) {
+			_, _ = in.Write(append(b, '\n'))
+		}
 }

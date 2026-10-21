@@ -13,9 +13,13 @@
 package main
 
 import (
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +33,8 @@ const (
 	kakaoBox  = "메시지 입력"
 )
 
+var kakaoDate = regexp.MustCompile(`^\d{4}년 \d{1,2}월 \d{1,2}일`)
+
 var kakaoTime = regexp.MustCompile(`^(오전|오후) \d{1,2}:\d{2}$|^\d{1,2}월 \d{1,2}일$|^어제$|^\d{4}\. ?\d{1,2}\. ?\d{1,2}\.?$`)
 
 func init() {
@@ -39,8 +45,9 @@ func init() {
 			"rooms":  "[-n 30] — chat list (doesn't open rooms)",
 			"unread": "[-n 60] — rooms with unread messages",
 			"triage": "[-n 60] — unread + category / needs_reply / urgency (Jev, else rules)",
-			"read":   `"<room>" [-n 20] — open the room, recent messages (clears the sender's '1')`,
+			"read":   `"<room>" [-n 20 | --all] — open the room, recent (or all) messages (clears the sender's '1')`,
 			"send":   `"<room>" "<text>" [--yes] — dry-run without --yes`,
+			"export": `"<room>" — KakaoTalk's own full-history export (CSV: Date, User, Message) → file path`,
 		},
 		confirmFlag: "--yes",
 		run:         kakaoRun,
@@ -65,6 +72,7 @@ type kakaoRoom struct {
 }
 
 type kakaoMsg struct {
+	Date   string `json:"date,omitempty"`
 	Time   string `json:"time,omitempty"`
 	Sender string `json:"sender,omitempty"`
 	Text   string `json:"text"`
@@ -95,7 +103,11 @@ func kakaoRun(sub string, args []string) (string, error) {
 		if len(f.pos) < 1 {
 			return "", fmt.Errorf(`needs "<room>"`)
 		}
-		msgs, err := kakaoRead(f.pos[0], f.int("-n", 20))
+		n := f.int("-n", 20)
+		if f.bools["--all"] {
+			n = 0
+		}
+		msgs, err := kakaoRead(f.pos[0], n)
 		if err != nil {
 			return "", err
 		}
@@ -104,9 +116,19 @@ func kakaoRun(sub string, args []string) (string, error) {
 		}
 		var lines []string
 		for _, m := range msgs {
-			lines = append(lines, fmt.Sprintf("[%s] %s: %s", m.Time, firstNonEmpty(m.Sender, "-"), clip(m.Text, 200)))
+			lines = append(lines, fmt.Sprintf("[%s %s] %s: %s", m.Date, m.Time, firstNonEmpty(m.Sender, "-"), clip(m.Text, 200)))
 		}
 		return strings.Join(lines, "\n"), nil
+
+	case "export":
+		if len(f.pos) < 1 {
+			return "", fmt.Errorf(`needs "<room>"`)
+		}
+		path, err := kakaoExport(f.pos[0])
+		if err != nil {
+			return "", err
+		}
+		return kakaoCSVSummary(path), nil
 
 	case "send":
 		if len(f.pos) < 2 {
@@ -194,32 +216,88 @@ func kakaoOpen(room string) error {
 	return nil
 }
 
+// kakaoRead returns the last n messages; n <= 0 loads the whole history first (see below).
 func kakaoRead(room string, n int) ([]kakaoMsg, error) {
 	if err := kakaoOpen(room); err != nil {
 		return nil, err
+	}
+	if n <= 0 {
+		rows, err := kakaoLoadHistory(room)
+		if err != nil {
+			return nil, err
+		}
+		n = rows
 	}
 	nodes, err := axDump(kakaoApp, "--window", room, "--rows", strconv.Itoa(n), "--tail", "--depth", "20")
 	if err != nil {
 		return nil, err
 	}
 	var msgs []kakaoMsg
+	date := ""
 	for _, row := range axRows(nodes) {
-		if m, ok := kakaoParseMsg(row); ok {
+		m, ok := kakaoParseMsg(row)
+		if m.Date != "" {
+			date = m.Date
+		}
+		if ok {
+			m.Date = date
 			msgs = append(msgs, m)
 		}
 	}
 	return msgs, nil
 }
 
+// kakaoLoadHistory: KakaoTalk keeps only recent messages loaded and fetches ~60 older ones each
+// time the chat is scrolled to the top. Scroll up until the row count stops growing (or a cap),
+// then return the row count.
+func kakaoLoadHistory(room string) (int, error) {
+	const maxRows, stableNeeded = 20000, 3
+	count := func() (int, error) {
+		out, err := axRun([]string{"rowcount", kakaoApp, "--window", room})
+		if err != nil {
+			return 0, err
+		}
+		return strconv.Atoi(strings.TrimSpace(out))
+	}
+	last, err := count()
+	if err != nil {
+		return 0, err
+	}
+	visCaption("⇡ 이전 대화 불러오는 중…")
+	for stable := 0; stable < stableNeeded && last < maxRows; {
+		if _, err := axRun([]string{"scroll", kakaoApp, "0", "--window", room, "--rows", "0"}); err != nil {
+			return 0, err
+		}
+		time.Sleep(900 * time.Millisecond)
+		n, err := count()
+		if err != nil {
+			return 0, err
+		}
+		if n > last {
+			stable = 0
+			visCaption(fmt.Sprintf("⇡ 이전 대화 불러오는 중… %d줄", n))
+		} else {
+			stable++
+		}
+		last = n
+	}
+	return last, nil
+}
+
 // kakaoParseMsg: received messages carry the sender's name (first AXStaticText of a run);
-// my own messages and follow-ups from the same sender have none.
+// my own messages and follow-ups from the same sender have none. The time text may carry the
+// unread count on its first line ("29\n오후 11:07"). Date-separator rows set m.Date only.
 func kakaoParseMsg(row []axNode) (kakaoMsg, bool) {
 	var m kakaoMsg
 	var text []string
 	for _, n := range row {
+		lines := strings.Split(n.V, "\n")
+		last := strings.TrimSpace(lines[len(lines)-1])
 		switch {
-		case n.R == "AXStaticText" && kakaoTime.MatchString(n.V):
-			m.Time = n.V
+		case n.R == "AXStaticText" && kakaoTime.MatchString(last):
+			m.Time = last
+		case n.R == "AXStaticText" && kakaoDate.MatchString(n.V):
+			m.Date = n.V
 		case n.R == "AXStaticText" && m.Sender == "":
 			m.Sender = n.V
 		case n.R == "AXTextArea" && n.V != "":
@@ -228,6 +306,100 @@ func kakaoParseMsg(row []axNode) (kakaoMsg, bool) {
 	}
 	m.Text = strings.Join(text, "\n")
 	return m, len(text) > 0
+}
+
+// ── export ──────────────────────────────────────────────────────────────────
+
+// kakaoExport drives KakaoTalk's own "대화 내용 저장 → 텍스트 파일로 저장" (complete history,
+// unlike scrolling, which KakaoTalk caps): 채팅 menu › 채팅방 설정 › 대화 내용 관리 tab (the 2nd,
+// unlabeled sidebar button) › 텍스트 파일로 저장 › 저장 › "내보내기가 완료되었습니다" 확인.
+// Saves to the panel's default folder (usually Downloads).
+func kakaoExport(room string) (string, error) {
+	const settings = "Window" // KakaoTalk's settings window has no real title
+	started := time.Now()
+	// a settings window left open would own the 채팅 menu — close it first
+	if ws, err := axRun([]string{"windows", kakaoApp}); err == nil && slices.Contains(strings.Split(ws, "\n"), settings) {
+		_, _ = axRun([]string{"close", kakaoApp, "--window", settings, "--rows", "0"})
+		time.Sleep(400 * time.Millisecond)
+	}
+	if err := kakaoOpen(room); err != nil {
+		return "", err
+	}
+	if o, code := doAX(shellJoin([]string{"press", kakaoApp, `role=AXMenuItem title="채팅방 설정"`,
+		"--menus", "--window", room, "--depth", "4", "--rows", "0"})); code != 0 {
+		return "", fmt.Errorf("채팅방 설정 열기: %s", o)
+	}
+	time.Sleep(800 * time.Millisecond)
+	defer axRun([]string{"close", kakaoApp, "--window", settings, "--rows", "0", "--no-activate"})
+	for _, s := range [][]string{
+		{"press", kakaoApp, "path=0.2", "--window", settings, "--rows", "0"}, // 대화 내용 관리 tab
+		{"press", kakaoApp, `role=AXButton title="텍스트 파일로 저장"`, "--window", settings, "--rows", "0"},
+		{"press", kakaoApp, "role=AXButton title=저장", "--window", settings, "--rows", "0", "--depth", "10"},
+	} {
+		if _, code := doAX(shellJoin(s)); code != 0 {
+			return "", fmt.Errorf("%s 실패", s[2])
+		}
+		time.Sleep(900 * time.Millisecond)
+	}
+	// "대화내용 내보내기가 완료되었습니다" sheet — dismiss it (it also blocks closing the window)
+	for i := 0; i < 20; i++ {
+		if _, code := doAX(shellJoin([]string{"press", kakaoApp, "role=AXButton title=확인", "--window", settings,
+			"--rows", "0", "--depth", "10"})); code == 0 {
+			break
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	// find the file the save panel wrote: newest KakaoTalk_Chat_* since we started. (Not matched
+	// by room name — the file name's Hangul may be NFD-normalized and differ byte-wise.)
+	home, _ := os.UserHomeDir()
+	for i := 0; i < 30; i++ {
+		var newest string
+		var newestT time.Time
+		for _, dir := range []string{"Downloads", "Documents", "Desktop"} {
+			matches, _ := filepath.Glob(filepath.Join(home, dir, "KakaoTalk_Chat_*"))
+			for _, m := range matches {
+				if st, err := os.Stat(m); err == nil && st.ModTime().After(started.Add(-2*time.Second)) && st.ModTime().After(newestT) {
+					newest, newestT = m, st.ModTime()
+				}
+			}
+		}
+		if newest != "" {
+			return newest, nil
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+	return "", fmt.Errorf("저장된 파일을 찾지 못함 (Downloads/Documents/Desktop)")
+}
+
+// kakaoCSVSummary: path + message count + date range of an exported chat.
+func kakaoCSVSummary(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return "saved " + path
+	}
+	defer f.Close()
+	rows, err := csv.NewReader(f).ReadAll()
+	if err != nil || len(rows) < 2 {
+		return "saved " + path
+	}
+	rows[0][0] = strings.TrimPrefix(rows[0][0], "\ufeff") // KakaoTalk writes a UTF-8 BOM
+	users := map[string]bool{}
+	for _, r := range rows[1:] {
+		if len(r) > 1 {
+			users[r[1]] = true
+		}
+	}
+	return fmt.Sprintf("saved %s\n메시지 %d개 · %s → %s · 보낸 사람 %d명 (열: %s)",
+		path, len(rows)-1, rows[1][0], rows[len(rows)-1][0], len(users), strings.Join(rows[0], ", "))
+}
+
+// shellJoin quotes args so doAX/splitArgs read them back unchanged.
+func shellJoin(args []string) string {
+	q := make([]string, len(args))
+	for i, a := range args {
+		q[i] = `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(a) + `"`
+	}
+	return strings.Join(q, " ")
 }
 
 // ── send ────────────────────────────────────────────────────────────────────

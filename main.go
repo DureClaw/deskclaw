@@ -79,8 +79,10 @@ func main() {
 		log.Printf("[deskclaw] ⚠️  GUI control not implemented on this OS — node joins but GUI verbs return an error")
 	}
 	for {
+		uiStatus("connecting", stateServer)
 		if err := run(); err != nil {
 			log.Printf("[deskclaw] %v — reconnecting in 3s", err)
+			uiStatus("disconnected", err.Error())
 			time.Sleep(3 * time.Second)
 		}
 	}
@@ -105,6 +107,7 @@ func run() error {
 		"capabilities": caps, "preferred_model": "desktop-gui", "version": "deskclaw/0.1",
 	}})
 	log.Printf("[deskclaw] joined work:%s as %s", workKey, agentName)
+	uiStatus("connected", fmt.Sprintf("%s · work:%s · %s", stateServer, workKey, agentName))
 
 	stop := make(chan struct{})
 	defer close(stop)
@@ -166,11 +169,13 @@ func handle(c *websocket.Conn, p taskPayload) {
 		from = "http@controller"
 	}
 	log.Printf("[deskclaw] task %s: %.70s", p.TaskID, instr)
+	uiEmit("task", map[string]any{"id": p.TaskID, "from": from, "text": clip(instr, 300)})
 	out, code := runTask(instr)
 	status := "done"
 	if code != 0 {
 		status = "blocked"
 	}
+	uiEmit("result", map[string]any{"id": p.TaskID, "status": status, "text": clip(out, 300)})
 	send(c, []any{joinRef(), nextRef(), "work:" + workKey, "task.result", map[string]any{
 		"task_id": p.TaskID, "to": from, "from": agentName,
 		"status": status, "output": clip(out, maxOutput), "exit_code": code, "backend": "deskclaw",
@@ -190,6 +195,10 @@ func runTask(instr string) (string, int) {
 		overlayDrop() // keep the indicator out of the image the master's vision reads
 	} else if drivesGUI(verb, rest) && !strings.Contains(rest, "--no-overlay") {
 		defer overlayHold()()
+	}
+	if winScoped(verb) && winStackOn() && !strings.Contains(rest, "--keep-windows") {
+		winMark()
+		defer func() { log.Printf("[deskclaw] %s", winRestore()) }()
 	}
 	switch verb {
 	// ── RPA control (not recorded) ──
@@ -219,6 +228,10 @@ func runTask(instr string) (string, int) {
 		return listPlugins(), 0
 	case "[APPS]":
 		return listApps(), 0
+	case "[MARK]":
+		return fmt.Sprintf("window stack depth %d — [RESTORE] closes windows opened from here", winMark()), 0
+	case "[RESTORE]":
+		return winRestore(), 0
 
 	// ── action verbs (captured while recording) ──
 	case "[LAUNCH]", "[CLICK]", "[DOUBLECLICK]", "[RIGHTCLICK]", "[MOVE]", "[TYPE]", "[KEY]", "[SCROLL]":
@@ -271,11 +284,13 @@ func execVerb(verb, rest string) (string, int) {
 	case "[MOVE]":
 		return doMove(rest)
 	case "[TYPE]":
+		visCaption("⌨ 입력: " + clip(rest, 40))
 		if err := guiType(rest); err != nil {
 			return err.Error(), 1
 		}
 		return "typed " + strconv.Itoa(len(rest)) + " chars", 0
 	case "[KEY]":
+		visCaption("⌨ " + strings.TrimSpace(rest))
 		if err := guiKey(strings.TrimSpace(rest)); err != nil {
 			return err.Error(), 1
 		}
@@ -329,9 +344,11 @@ func doClick(verb, rest string) (string, int) {
 	case "[RIGHTCLICK]":
 		button = "right"
 	}
+	visMove(x, y)
 	if err := guiClick(x, y, button, double); err != nil {
 		return err.Error(), 1
 	}
+	visClick(x, y)
 	return fmt.Sprintf("%s at %d,%d", strings.Trim(strings.ToLower(verb), "[]"), x, y), 0
 }
 

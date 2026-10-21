@@ -53,7 +53,7 @@ type plugin struct {
 }
 
 // builtinVerbs can't be shadowed by a plugin.
-var builtinVerbs = []string{"[RECORD]", "[ENDREC]", "[RUN]", "[MACROS]", "[SCREENSHOT]", "[AX]", "[PLUGINS]", "[APPS]",
+var builtinVerbs = []string{"[RECORD]", "[ENDREC]", "[RUN]", "[MACROS]", "[SCREENSHOT]", "[AX]", "[PLUGINS]", "[APPS]", "[MARK]", "[RESTORE]",
 	"[LAUNCH]", "[CLICK]", "[DOUBLECLICK]", "[RIGHTCLICK]", "[MOVE]", "[TYPE]", "[KEY]", "[SCROLL]"}
 
 var (
@@ -159,8 +159,8 @@ func runPlugin(verb string, p *plugin, rest string) (string, int) {
 	if len(p.Subcommands) > 0 && (len(sub) == 0 || !slices.Contains(p.Subcommands, sub[0])) {
 		return verb + " " + strings.Join(p.Subcommands, "|") + " …", 1
 	}
-	if p.ConfirmFlag != "" && slices.Contains(sub, p.ConfirmFlag) && !p.AllowConfirm {
-		return fmt.Sprintf("%s %s refused — this node's manifest has allow_confirm=false", verb, p.ConfirmFlag), 1
+	if p.ConfirmFlag != "" && slices.Contains(sub, p.ConfirmFlag) && !p.AllowConfirm && !uiApprove(verb+" "+rest) {
+		return fmt.Sprintf("%s %s refused — not approved on this node (allow_confirm=false)", verb, p.ConfirmFlag), 1
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(p.TimeoutSec)*time.Second)

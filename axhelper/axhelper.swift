@@ -14,8 +14,15 @@
 //   axhelper pick  <app> <text> [opts]         select the first table row whose first text == <text>,
 //                                              press Return, wait for a window titled <text>
 //   axhelper key   <app> <name>                post a key (return, escape, tab, …) to the app's pid
-//   axhelper overlay "<message>" [seconds=120] on-screen "automation running" border + banner
-//                                              (click-through, no focus; exits on SIGTERM / parent death)
+//   axhelper close <app> --window <title>      press a window's close button
+//   axhelper snapshot                          all windows (id, pid, owner, frame) — for the window stack
+//   axhelper closewin <pid> <x> <y> <w> <h>    close that window (close button, else Cancel)
+//   axhelper rowcount <app> [opts]             number of rows in the first table/list
+//   axhelper scroll <app> [query] <0..1>       set a scroll bar (default: the first) — 0 top, 1 bottom
+//   axhelper locate <app> <query> [opts]       JSON: target path/frame/label + same-role candidates' frames
+//   axhelper overlay "<message>" [seconds=120] on-screen border + banner + virtual cursor layer driven
+//                                              by JSON lines on stdin (click-through, no focus; exits on
+//                                              SIGTERM / parent death)
 //
 // <app>    app name ("Safari"), bundle id ("com.apple.Safari") or pid
 // <query>  space-separated terms, all must match:
@@ -113,7 +120,8 @@ struct Node {
 // ---------------------------------------------------------------- app & roots
 
 func resolveApp(_ q: String) -> NSRunningApplication {
-    let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }
+    // regular apps + menu-bar (accessory) apps; background daemons have no UI to drive
+    let apps = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy != .prohibited }
     if let pid = Int32(q), let a = NSRunningApplication(processIdentifier: pid) { return a }
     if let a = apps.first(where: { $0.bundleIdentifier == q }) { return a }
     if let a = apps.first(where: { $0.localizedName?.caseInsensitiveCompare(q) == .orderedSame }) { return a }
@@ -146,6 +154,9 @@ func roots(_ ra: NSRunningApplication) -> [Node] {
         usleep(100_000)
     }
     var out = wins.enumerated().map { Node($0.element, "\($0.offset)", 0) }
+    // open pop-up / context menus hang off the app, not a window — include them ("p0", "p1"…)
+    let popups = ((attr(app, kAXChildrenAttribute) as? [AXUIElement]) ?? []).filter { str(attr($0, kAXRoleAttribute)) == "AXMenu" }
+    out.append(contentsOf: popups.enumerated().map { Node($0.element, "p\($0.offset)", 0) })
     if flags.contains("--menus"), let mb = attr(app, kAXMenuBarAttribute) {
         out.append(Node(mb as! AXUIElement, "m", 0))
     }
@@ -258,6 +269,9 @@ func click(_ n: Node) -> Bool {
     AXValueGetValue(p as! AXValue, .cgPoint, &pt)
     AXValueGetValue(s as! AXValue, .cgSize, &sz)
     let c = CGPoint(x: pt.x + sz.width / 2, y: pt.y + sz.height / 2)
+    // move first: some apps ignore a down/up that arrives without the pointer being there
+    CGEvent(mouseEventSource: nil, mouseType: .mouseMoved, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
+    usleep(60_000)
     for t in [CGEventType.leftMouseDown, .leftMouseUp] {
         CGEvent(mouseEventSource: nil, mouseType: t, mouseCursorPosition: c, mouseButton: .left)?.post(tap: .cghidEventTap)
         usleep(30_000)
@@ -292,9 +306,169 @@ func emit(_ d: [String: Any]) {
     if let data = try? JSONSerialization.data(withJSONObject: d), let s = String(data: data, encoding: .utf8) { print(s) }
 }
 
+// ---------------------------------------------------------------- overlay (visual layer)
+//
+// Full-screen, click-through, never-focused windows on every display: blinking orange border,
+// top banner, and a visual layer driven by JSON lines on stdin (coordinates are AX/global,
+// top-left origin — the same space `locate` and [CLICK] x y use):
+//   {"c":"look","cands":[[x,y,w,h],…],"target":[x,y,w,h],"label":"등호"}   candidates + chosen one
+//   {"c":"move","x":…,"y":…,"ms":450}                                     glide the virtual cursor
+//   {"c":"click","x":…,"y":…}                                             click ripple
+//   {"c":"caption","text":"⌨ 입력 중…"}                                     bubble next to the cursor
+//   {"c":"clear"}
+
+let accent = NSColor(calibratedRed: 1.0, green: 0.45, blue: 0.0, alpha: 1.0)
+
+final class Visual {
+    static let shared = Visual()
+    var cursor = NSEvent.mouseLocation          // AppKit global (bottom-left origin)
+    var from = NSEvent.mouseLocation, to = NSEvent.mouseLocation
+    var moveStart = Date.distantPast, moveDur = 0.45
+    var cands: [NSRect] = []
+    var target: NSRect?
+    var label = ""
+    var lookAt = Date.distantPast
+    var ripples: [(NSPoint, Date)] = []
+    var caption = ""
+    var captionAt = Date.distantPast
+    var borderOn = true
+
+    /// AX/global top-left → AppKit global bottom-left (relative to the primary screen)
+    static func flip(_ x: CGFloat, _ y: CGFloat) -> NSPoint {
+        NSPoint(x: x, y: (NSScreen.screens.first?.frame.maxY ?? 0) - y)
+    }
+    static func flipRect(_ a: [Double]) -> NSRect? {
+        guard a.count >= 4 else { return nil }
+        let o = flip(a[0], a[1] + a[3])
+        return NSRect(x: o.x, y: o.y, width: a[2], height: a[3])
+    }
+
+    func tick() {
+        let t = min(1, Date().timeIntervalSince(moveStart) / moveDur)
+        let e = t < 0.5 ? 4 * t * t * t : 1 - pow(-2 * t + 2, 3) / 2  // easeInOutCubic
+        cursor = NSPoint(x: from.x + (to.x - from.x) * e, y: from.y + (to.y - from.y) * e)
+        ripples.removeAll { Date().timeIntervalSince($0.1) > 0.7 }
+    }
+
+    func apply(_ m: [String: Any]) {
+        let num = { (k: String) in (m[k] as? NSNumber)?.doubleValue ?? 0 }
+        switch m["c"] as? String ?? "" {
+        case "look":
+            cands = ((m["cands"] as? [[Double]]) ?? []).compactMap(Visual.flipRect)
+            target = (m["target"] as? [Double]).flatMap(Visual.flipRect)
+            label = m["label"] as? String ?? ""
+            lookAt = Date()
+        case "move":
+            from = cursor
+            to = Visual.flip(num("x"), num("y"))
+            moveDur = max(0.05, num("ms") / 1000)
+            moveStart = Date()
+        case "click":
+            ripples.append((Visual.flip(num("x"), num("y")), Date()))
+        case "caption":
+            caption = m["text"] as? String ?? ""
+            captionAt = Date()
+        case "clear":
+            cands = []; target = nil; caption = ""
+        default: break
+        }
+    }
+}
+
+final class FXView: NSView {
+    override var isFlipped: Bool { false }
+
+    func local(_ p: NSPoint) -> NSPoint {
+        guard let w = window else { return p }
+        return NSPoint(x: p.x - w.frame.minX, y: p.y - w.frame.minY)
+    }
+    func local(_ r: NSRect) -> NSRect { NSRect(origin: local(r.origin), size: r.size) }
+
+    override func draw(_ dirty: NSRect) {
+        let v = Visual.shared
+        // border
+        let b = NSBezierPath(rect: bounds.insetBy(dx: 4, dy: 4))
+        b.lineWidth = 8
+        accent.withAlphaComponent(v.borderOn ? 0.9 : 0.35).setStroke()
+        b.stroke()
+
+        // candidates the agent is considering, fading after a few seconds
+        let lookAge = Date().timeIntervalSince(v.lookAt)
+        let lookAlpha = CGFloat(max(0, min(1, (4.0 - lookAge) / 1.0)))
+        if lookAlpha > 0 {
+            for c in v.cands {
+                let r = NSBezierPath(roundedRect: local(c).insetBy(dx: -2, dy: -2), xRadius: 6, yRadius: 6)
+                r.lineWidth = 1.5
+                r.setLineDash([5, 4], count: 2, phase: 0)
+                NSColor.systemBlue.withAlphaComponent(0.55 * lookAlpha).setStroke()
+                r.stroke()
+            }
+            if let t = v.target {
+                let rr = local(t).insetBy(dx: -4, dy: -4)
+                let r = NSBezierPath(roundedRect: rr, xRadius: 8, yRadius: 8)
+                accent.withAlphaComponent(0.18 * lookAlpha).setFill()
+                r.fill()
+                r.lineWidth = 3
+                accent.withAlphaComponent(lookAlpha).setStroke()
+                r.stroke()
+                if !v.label.isEmpty { pill("🎯 " + v.label, at: NSPoint(x: rr.minX, y: rr.maxY + 6), alpha: lookAlpha) }
+            }
+        }
+
+        // click ripples
+        for (p, t) in v.ripples {
+            let age = CGFloat(Date().timeIntervalSince(t) / 0.7)
+            let c = local(p)
+            let rad = 8 + 34 * age
+            let o = NSBezierPath(ovalIn: NSRect(x: c.x - rad, y: c.y - rad, width: rad * 2, height: rad * 2))
+            o.lineWidth = 3
+            accent.withAlphaComponent(1 - age).setStroke()
+            o.stroke()
+        }
+
+        // virtual cursor (arrow) + name tag + caption
+        let c = local(v.cursor)
+        guard bounds.insetBy(dx: -40, dy: -40).contains(c) else { return }
+        let a = NSBezierPath()
+        a.move(to: c)
+        a.line(to: NSPoint(x: c.x, y: c.y - 26))
+        a.line(to: NSPoint(x: c.x + 7, y: c.y - 20))
+        a.line(to: NSPoint(x: c.x + 12, y: c.y - 31))
+        a.line(to: NSPoint(x: c.x + 17, y: c.y - 29))
+        a.line(to: NSPoint(x: c.x + 12, y: c.y - 18))
+        a.line(to: NSPoint(x: c.x + 20, y: c.y - 18))
+        a.close()
+        NSGraphicsContext.saveGraphicsState()
+        let sh = NSShadow()
+        sh.shadowColor = NSColor.black.withAlphaComponent(0.4)
+        sh.shadowBlurRadius = 4
+        sh.shadowOffset = NSSize(width: 1, height: -2)
+        sh.set()
+        accent.setFill()
+        a.fill()
+        NSGraphicsContext.restoreGraphicsState()
+        NSColor.white.setStroke()
+        a.lineWidth = 2
+        a.stroke()
+        pill("Claude", at: NSPoint(x: c.x + 18, y: c.y - 46), alpha: 1, small: true)
+        if !v.caption.isEmpty && Date().timeIntervalSince(v.captionAt) < 4 {
+            pill(v.caption, at: NSPoint(x: c.x + 18, y: c.y - 74), alpha: 1)
+        }
+    }
+
+    func pill(_ text: String, at p: NSPoint, alpha: CGFloat, small: Bool = false) {
+        let font = NSFont.systemFont(ofSize: small ? 11 : 13, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white.withAlphaComponent(alpha)]
+        let sz = (text as NSString).size(withAttributes: attrs)
+        let r = NSRect(x: p.x, y: p.y, width: sz.width + 16, height: sz.height + 6)
+        accent.withAlphaComponent(alpha).setFill()
+        NSBezierPath(roundedRect: r, xRadius: r.height / 2, yRadius: r.height / 2).fill()
+        (text as NSString).draw(at: NSPoint(x: r.minX + 8, y: r.minY + 3), withAttributes: attrs)
+    }
+}
+
 func runOverlay(_ message: String, _ maxSeconds: Double) -> Never {
     let parent = getppid()
-    let accent = NSColor(calibratedRed: 1.0, green: 0.45, blue: 0.0, alpha: 1.0)
     let app = NSApplication.shared
     app.setActivationPolicy(.accessory)  // no Dock icon, never activates
 
@@ -308,25 +482,17 @@ func runOverlay(_ message: String, _ maxSeconds: Double) -> Never {
         w.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
         return w
     }
-    final class Border: NSView {
-        let color: NSColor
-        init(frame: NSRect, color: NSColor) { self.color = color; super.init(frame: frame) }
-        required init?(coder: NSCoder) { fatalError() }
-        override func draw(_ dirtyRect: NSRect) {
-            let p = NSBezierPath(rect: bounds.insetBy(dx: 4, dy: 4))
-            p.lineWidth = 8
-            color.withAlphaComponent(0.9).setStroke()
-            p.stroke()
-        }
-    }
 
+    var views: [FXView] = []
     var windows: [NSWindow] = []
     for screen in NSScreen.screens {
         let f = screen.frame
-        let border = overlayWindow(f)
-        border.contentView = Border(frame: NSRect(origin: .zero, size: f.size), color: accent)
-        border.orderFrontRegardless()
-        windows.append(border)
+        let fx = overlayWindow(f)
+        let v = FXView(frame: NSRect(origin: .zero, size: f.size))
+        fx.contentView = v
+        fx.orderFrontRegardless()
+        views.append(v)
+        windows.append(fx)
 
         let text = "●  \(message)  —  마우스·키보드를 건드리지 마세요"
         let font = NSFont.systemFont(ofSize: 15, weight: .semibold)
@@ -349,20 +515,30 @@ func runOverlay(_ message: String, _ maxSeconds: Double) -> Never {
         banner.contentView = box
         banner.orderFrontRegardless()
         windows.append(banner)
+    }
 
-        Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { _ in  // blinking border
-            NSAnimationContext.runAnimationGroup { ctx in
-                ctx.duration = 0.4
-                border.animator().alphaValue = border.alphaValue < 1 ? 1 : 0.35
+    // commands on stdin
+    FileHandle.standardInput.readabilityHandler = { h in
+        let d = h.availableData
+        if d.isEmpty { h.readabilityHandler = nil; return }
+        for line in d.split(separator: 0x0A) {
+            if let m = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] {
+                DispatchQueue.main.async { Visual.shared.apply(m) }
             }
         }
     }
+    Timer.scheduledTimer(withTimeInterval: 1.0 / 60, repeats: true) { _ in  // animation
+        Visual.shared.tick()
+        views.forEach { $0.needsDisplay = true }
+    }
+    Timer.scheduledTimer(withTimeInterval: 0.8, repeats: true) { _ in Visual.shared.borderOn.toggle() }
     let started = Date()
     Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in  // safety: parent gone / timeout
         if getppid() != parent || Date().timeIntervalSince(started) > maxSeconds { exit(0) }
     }
     signal(SIGTERM) { _ in exit(0) }
     signal(SIGINT) { _ in exit(0) }
+    _ = windows
     app.run()
     exit(0)
 }
@@ -383,7 +559,7 @@ func collectText(_ rs: [Node]) -> [String] {
 
 // ---------------------------------------------------------------- main
 
-guard let cmd = positional.first else { fail("usage: axhelper apps|tree|find|text|press|set|dump|windows|pick|key|overlay …", 2) }
+guard let cmd = positional.first else { fail("usage: axhelper apps|tree|find|text|locate|close|snapshot|closewin|rowcount|scroll|press|set|dump|windows|pick|key|overlay …", 2) }
 let args = Array(positional.dropFirst())
 
 switch cmd {
@@ -412,6 +588,97 @@ case "text":
     guard args.count >= 1 else { fail("usage: axhelper text <app> [query]", 2) }
     let rs = roots(resolveApp(args[0]))
     print(collectText(args.count >= 2 ? [target(rs, args[1])] : rs).joined(separator: "\n"))
+
+case "locate":
+    // target + same-role candidates in the same window, with frames — for the visual layer
+    guard args.count >= 2 else { fail("usage: axhelper locate <app> <query>", 2) }
+    let rs = roots(resolveApp(args[0]))
+    let t = target(rs, args[1])
+    func rect(_ n: Node) -> [Int]? {
+        guard let p = attr(n.el, kAXPositionAttribute), let s = attr(n.el, kAXSizeAttribute) else { return nil }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+        AXValueGetValue(s as! AXValue, .cgSize, &sz)
+        return [Int(pt.x), Int(pt.y), Int(sz.width), Int(sz.height)]
+    }
+    let win = t.path.split(separator: ".").first.map(String.init) ?? ""
+    var cands: [[Int]] = []
+    walk(rs.filter { $0.path == win }) { n in
+        if n.role == t.role, n.path != t.path, let r = rect(n), r[2] > 0, r[3] > 0 { cands.append(r) }
+        return cands.count < 60
+    }
+    var out: [String: Any] = ["path": t.path, "role": t.role, "label": t.label, "cands": cands]
+    if let r = rect(t) { out["frame"] = r }
+    emit(out)
+
+case "snapshot":
+    // ALL normal windows (layer 0) — every Space, minimised, hidden — front to back:
+    // {"id","pid","owner","b":[x,y,w,h]}. Not on-screen-only: switching Spaces would make
+    // old windows look new.
+    let list = (CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]]) ?? []
+    // only regular apps' windows — system helpers (CursorUIViewService…) are not ours to close
+    let regular = Set(NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular }.map { Int($0.processIdentifier) })
+    for w in list where (w[kCGWindowLayer as String] as? Int ?? -1) == 0 && regular.contains(w[kCGWindowOwnerPID as String] as? Int ?? -1) {
+        let b = w[kCGWindowBounds as String] as? [String: Any] ?? [:]
+        let r = ["X", "Y", "Width", "Height"].map { Int((b[$0] as? NSNumber)?.doubleValue ?? 0) }
+        emit(["id": w[kCGWindowNumber as String] as? Int ?? 0, "pid": w[kCGWindowOwnerPID as String] as? Int ?? 0,
+              "owner": w[kCGWindowOwnerName as String] as? String ?? "", "b": r])
+    }
+
+case "closewin":
+    // close the window of <pid> at frame x y w h (from snapshot): close button, else Cancel
+    guard args.count >= 5, let pid = Int32(args[0]) else { fail("usage: axhelper closewin <pid> <x> <y> <w> <h>", 2) }
+    let want = args[1...4].compactMap { Int($0) }
+    guard want.count == 4 else { fail("bad frame", 2) }
+    let app = AXUIElementCreateApplication(pid)
+    AXUIElementSetMessagingTimeout(app, 3.0)
+    func frameOf(_ el: AXUIElement) -> [Int] {
+        guard let p = attr(el, kAXPositionAttribute), let s = attr(el, kAXSizeAttribute) else { return [] }
+        var pt = CGPoint.zero, sz = CGSize.zero
+        AXValueGetValue(p as! AXValue, .cgPoint, &pt)
+        AXValueGetValue(s as! AXValue, .cgSize, &sz)
+        return [Int(pt.x), Int(pt.y), Int(sz.width), Int(sz.height)]
+    }
+    let wins = (attr(app, kAXWindowsAttribute) as? [AXUIElement]) ?? []
+    guard let w = wins.first(where: { f in let r = frameOf(f); return r.count == 4 && zip(r, want).allSatisfy { abs($0 - $1) <= 2 } }) else {
+        fail("no window of pid \(pid) at \(want)", 5)
+    }
+    for key in [kAXCloseButtonAttribute, kAXCancelButtonAttribute] {
+        if let b = attr(w, key) {
+            if AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString) == .success {
+                print("closed \(windowTitle(w))"); exit(0)
+            }
+        }
+    }
+    fail("window \(windowTitle(w)) has no close/cancel button", 6)
+
+case "close":
+    // press the window's close button (works where ⌘W doesn't)
+    guard args.count >= 1, opts["--window"] != nil else { fail("usage: axhelper close <app> --window <title>", 2) }
+    let w = roots(resolveApp(args[0])).first { $0.role == "AXWindow" }
+    guard let win = w, let b = attr(win.el, kAXCloseButtonAttribute) else { fail("no close button", 6) }
+    if AXUIElementPerformAction(b as! AXUIElement, kAXPressAction as CFString) != .success { fail("close failed", 6) }
+    print("closed \(windowTitle(win.el))")
+
+case "rowcount":
+    // rows in the first table/list (e.g. how much chat history is loaded)
+    guard args.count >= 1 else { fail("usage: axhelper rowcount <app> [--window t]", 2) }
+    var table: AXUIElement?
+    walk(roots(resolveApp(args[0]))) { n in
+        if n.role == "AXTable" || n.role == "AXOutline" { table = n.el; return false }
+        return true
+    }
+    guard let t = table else { fail("no table/list found", 5) }
+    print(((attr(t, kAXRowsAttribute) as? [AXUIElement]) ?? []).count)
+
+case "scroll":
+    // set the first scroll bar (or the matched one) to a position: 0 = top, 1 = bottom
+    guard args.count >= 2, let pos = Double(args.last!) else { fail("usage: axhelper scroll <app> [query] <0..1>", 2) }
+    let rs = roots(resolveApp(args[0]))
+    let bar = args.count >= 3 ? target(rs, args[1]) : target(rs, "role=AXScrollBar")
+    let r = AXUIElementSetAttributeValue(bar.el, kAXValueAttribute as CFString, NSNumber(value: pos))
+    if r != .success { fail("can't scroll \(bar.line) (AX error \(r.rawValue))", 8) }
+    print("scrolled \(bar.path) to \(pos)")
 
 case "press":
     guard args.count >= 2 else { fail("usage: axhelper press <app> <query>", 2) }
@@ -456,15 +723,29 @@ case "pick":
     let ra = resolveApp(args[0])
     let app = axApp(ra)
     let name = args[1]
-    if !pickWindows(app, nil).filter({ windowTitle($0) == name }).isEmpty {
-        ra.activate(); print("already-open"); exit(0)
+    if let w = pickWindows(app, nil).first(where: { windowTitle($0) == name }) {
+        ra.activate()
+        AXUIElementPerformAction(w, kAXRaiseAction as CFString)  // bring that window to the front
+        AXUIElementSetAttributeValue(w, kAXMainAttribute as CFString, kCFBooleanTrue)
+        print("already-open"); exit(0)
     }
     var table: AXUIElement?
-    walk(roots(ra)) { n in
-        if n.role == "AXTable" || n.role == "AXOutline" { table = n.el; return false }
+    var listWin: AXUIElement?
+    let rs = roots(ra)
+    walk(rs) { n in
+        if n.role == "AXTable" || n.role == "AXOutline" {
+            table = n.el
+            listWin = rs.first { $0.path == String(n.path.split(separator: ".").first ?? "") }?.el
+            return false
+        }
         return true
     }
     guard let t = table else { fail("no table/list found", 5) }
+    if let w = listWin {  // Return goes to the key window — make it the list's window
+        AXUIElementPerformAction(w, kAXRaiseAction as CFString)
+        AXUIElementSetAttributeValue(w, kAXMainAttribute as CFString, kCFBooleanTrue)
+        usleep(80_000)
+    }
     let rows = (attr(t, kAXRowsAttribute) as? [AXUIElement]) ?? []
     let limit = min(rows.count, Int(opts["--rows"] ?? "") ?? 200)
     guard let row = rows.prefix(limit).first(where: { firstText($0) == name }) else {
