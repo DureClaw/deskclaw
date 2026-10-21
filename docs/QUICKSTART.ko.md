@@ -20,17 +20,57 @@ Claude Code에게 말로 시키면, 내 맥의 앱을 deskclaw가 대신 조작�
 
 ---
 
+## ⚡ 1줄 설치 (권장)
+
+터미널에 한 줄이면 아래 1~4단계가 모두 끝납니다.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh | bash
+```
+
+자동으로 하는 일:
+
+1. Claude Code에 DureClaw 플러그인 설치 (이미 있으면 건너뜀)
+2. DureClaw 버스 확인 — 없으면 설치해서 백그라운드로 실행
+3. 버스 토큰 읽기 → Work Key 확보
+4. DeskClaw.app 설치(`/Applications`) → 설정 자동 입력 → 실행 → 버스 접속 확인
+
+**남는 일은 하나:** 뜨는 권한 창에서 **손쉬운 사용**과 **화면 기록**에 DeskClaw를 켜는 것.
+(macOS 보안 정책상 이것만은 스크립트가 대신 켤 수 없습니다. 켜면 "권한 허용됨" 알림이 옵니다.)
+그다음 바로 [5. 첫 작업](#5-첫-작업--말로-시키기)으로 가세요.
+
+**다른 맥을 손으로 붙일 때** — 버스가 이미 다른 곳(예: 사무실 맥)에 있으면, 붙일 맥에서:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh \
+  | bash -s -- --bus 100.64.0.10:4000 --token <버스 토큰> --no-plugin
+```
+
+| 옵션 | 뜻 |
+|---|---|
+| `--bus HOST:PORT` | 기존 버스 주소 (없으면 이 맥에 버스를 띄움) |
+| `--token SECRET` | 버스 토큰 (이 맥에 버스가 있으면 자동으로 읽음) |
+| `--name 이름` | 노드 이름 (기본 `deskclaw@컴퓨터이름`) |
+| `--work-key WK-…` | 쓸 Work Key (기본: 버스의 최근 키, 없으면 새로 만듦) |
+| `--no-plugin` | Claude Code 플러그인 설치 건너뛰기 (손 역할만 하는 맥) |
+
+---
+
+## 단계별 설치 (직접 하고 싶을 때)
+
+아래 1~4단계는 1줄 설치가 하는 일을 손으로 하는 방법입니다.
+
 ## 0. 준비물
 
 | 항목 | 내용 |
 |---|---|
 | 맥 | macOS 13 이상 (요소 조작·카카오톡 기능·메뉴바 앱은 macOS 전용) |
 | Claude Code | 설치·로그인 완료 |
-| 빌드 도구 | Go 1.24+, Xcode Command Line Tools (`xcode-select --install`) |
+| 빌드 도구 | 단계별로 소스에서 빌드할 때만: Go 1.24+, Xcode Command Line Tools |
 | (여러 대일 때) | 모든 기기가 같은 네트워크 또는 [Tailscale](https://tailscale.com) |
 
-> **사전 빌드에 대하여:** GitHub 릴리스의 최신판(v0.1.0)에는 스크린샷·클릭·입력 같은 기본 기능만 있고,
-> `[AX]`·`[KAKAO]`·DeskClaw.app은 들어 있지 않습니다. 지금은 **3단계처럼 소스에서 빌드**하세요.
+> 1줄 설치는 GitHub 릴리스의 `DeskClaw-macos.zip`을 받습니다. 릴리스에 없으면 소스에서 빌드하므로
+> 그때만 Go와 Xcode Command Line Tools가 필요합니다.
 
 ---
 

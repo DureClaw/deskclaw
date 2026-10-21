@@ -21,8 +21,12 @@ deskclaw = desktop GUI eyes+hands (screenshot·click·type) — Windows/macOS na
 **한 줄 요약:** deskclaw는 내 컴퓨터의 앱을 AI가 대신 눌러 주는 "손"입니다. 사람이 마우스로
 하던 일을 AI가 원격에서 시키면, deskclaw가 화면 속 버튼과 입력칸을 직접 찾아 누릅니다.
 
-> 🚀 **처음이라면:** [빠른 시작 — Claude Code + DureClaw + deskclaw](docs/QUICKSTART.ko.md)
-> (설치부터 "카톡 답장할 방 골라줘"까지 30분)
+> 🚀 **처음이라면 — 맥에서 1줄:**
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh | bash
+> ```
+> Claude Code 플러그인 · DureClaw 버스 · DeskClaw.app 설치와 연결까지 자동. 남는 건 macOS 권한 켜기 하나.
+> 자세한 안내: [빠른 시작 — Claude Code + DureClaw + deskclaw](docs/QUICKSTART.ko.md)
 
 ### 왜 빠른가 — 화면을 "보지" 않고 "읽는다"
 
@@ -309,7 +313,15 @@ The shell runs the node with `DESK_UI=1` and talks JSON lines over stdin/stdout 
 
 ## Install / run
 
-Prebuilt — one line, auto-detects your OS/CPU (macOS · Windows · Linux-stub):
+**macOS, everything in one line** (Claude Code plugin + DureClaw bus + DeskClaw.app, configured
+and connected; only the macOS permission toggle is left to you):
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh | bash
+# join an existing bus instead:  … | bash -s -- --bus HOST:4000 --token <OAH_SECRET> --no-plugin
+```
+
+**CLI node only** — prebuilt — one line, auto-detects your OS/CPU (macOS · Windows · Linux-stub):
 
 ```sh
 curl -fsSL https://github.com/DureClaw/deskclaw/releases/latest/download/install.sh | sh

@@ -104,6 +104,20 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             openSettings()  // first run
         } else {
             startNode()
+            if !AXIsProcessTrusted() {  // fresh install (e.g. setup.sh): ask for permissions right away
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.checkPermissions() }
+            }
+        }
+    }
+
+    /// After pointing the person at System Settings, notice when Accessibility is switched on.
+    func watchPermission() {
+        Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { t in
+            if AXIsProcessTrusted() {
+                t.invalidate()
+                self.notify("권한 허용됨 ✅", "이제 화면을 읽고 조작할 수 있습니다.")
+                self.restartNode()
+            }
         }
     }
 
@@ -327,7 +341,7 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "시스템 설정 › 개인정보 보호 및 보안 에서 DeskClaw를 켜 주세요. 켠 뒤에는 노드를 재시작합니다."
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
-        if ax && screen { restartNode() }
+        if ax && screen { restartNode() } else if !ax { watchPermission() }
     }
 
     @objc func openLog() { NSWorkspace.shared.open(logURL) }
