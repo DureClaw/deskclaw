@@ -49,6 +49,20 @@ func macroDir() string {
 	return filepath.Join(base, "deskclaw", "macros")
 }
 
+// validMacroName keeps a macro inside macroDir: the name becomes a file name, and it comes from
+// the bus, so "../x" would write or read JSON anywhere the user can.
+func validMacroName(name string) error {
+	if name == "" || name == "." || name == ".." || strings.HasPrefix(name, ".") {
+		return fmt.Errorf("bad macro name %q", name)
+	}
+	for _, r := range name {
+		if !(r == '-' || r == '_' || r == '.' || r >= '0' && r <= '9' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= 0xAC00 && r <= 0xD7A3) {
+			return fmt.Errorf("bad macro name %q — letters, digits, Hangul, . _ - only", name)
+		}
+	}
+	return nil
+}
+
 func startRecording(name string) {
 	recMu.Lock()
 	defer recMu.Unlock()
@@ -89,6 +103,9 @@ func stopRecording(createdAt string) (string, int, error) {
 }
 
 func loadMacro(name string) (*macro, error) {
+	if err := validMacroName(name); err != nil {
+		return nil, err
+	}
 	b, err := os.ReadFile(filepath.Join(macroDir(), name+".json"))
 	if err != nil {
 		return nil, fmt.Errorf("macro %q not found", name)

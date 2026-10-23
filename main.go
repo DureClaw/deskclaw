@@ -64,6 +64,9 @@ func main() {
 		maxOutput = 4000
 	}
 	log.Printf("[deskclaw] %s (role=%s, os=%s) → bus %s work:%s", agentName, agentRole, guiOS(), stateServer, workKey)
+	if w := plaintextTokenWarning(); w != "" {
+		log.Printf("[deskclaw] ⚠️  %s", w)
+	}
 	if axSupported() {
 		caps = append(caps, "ax")
 	}
@@ -89,9 +92,9 @@ func main() {
 }
 
 func run() error {
-	url := fmt.Sprintf("ws://%s/socket/websocket?vsn=2.0.0", stateServer)
+	url := busSocketURL() + "/socket/websocket?vsn=2.0.0"
 	if secret != "" {
-		url += "&token=" + secret
+		url += "&token=" + secret // Phoenix reads connect params from the query
 	}
 	c, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -170,7 +173,12 @@ func handle(c *websocket.Conn, p taskPayload) {
 	}
 	log.Printf("[deskclaw] task %s: %.70s", p.TaskID, instr)
 	uiEmit("task", map[string]any{"id": p.TaskID, "from": from, "text": clip(instr, 300)})
-	out, code := runTask(instr)
+	out, code := "", 0
+	if refusal := senderGuard(from, p.To, instr); refusal != "" {
+		out, code = refusal, 1
+	} else {
+		out, code = runTask(instr)
+	}
 	status := "done"
 	if code != 0 {
 		status = "blocked"
@@ -191,6 +199,9 @@ func handle(c *websocket.Conn, p taskPayload) {
 func runTask(instr string) (string, int) {
 	t := strings.TrimSpace(instr)
 	verb, rest := splitVerb(t)
+	if !verbAllowed(verb) {
+		return verbRefused(verb), 1
+	}
 	if verb == "[SCREENSHOT]" {
 		overlayDrop() // keep the indicator out of the image the master's vision reads
 	} else if drivesGUI(verb, rest) && !strings.Contains(rest, "--no-overlay") {
@@ -206,6 +217,9 @@ func runTask(instr string) (string, int) {
 		name := strings.TrimSpace(rest)
 		if name == "" {
 			return "record needs a name: [RECORD] <macro>", 1
+		}
+		if err := validMacroName(name); err != nil {
+			return err.Error(), 1
 		}
 		startRecording(name)
 		return "● recording macro " + name + " — following actions are captured; [ENDREC] to save", 0
@@ -271,7 +285,14 @@ func execAndRecord(verb, rest string, recordable bool) (string, int) {
 }
 
 // execVerb runs ONE GUI action — shared by live handling and deterministic macro replay.
+// The policy is checked here too, so a macro recorded under a looser policy can't replay past it.
 func execVerb(verb, rest string) (string, int) {
+	if !verbAllowed(verb) {
+		return verbRefused(verb), 1
+	}
+	if refusal := shellGuard(verb, rest); refusal != "" {
+		return refusal, 1
+	}
 	switch verb {
 	case "[LAUNCH]":
 		app := strings.TrimSpace(rest)

@@ -6,9 +6,10 @@
 # 이 맥 한 대로 시작(기본): DureClaw 플러그인 설치 → 버스(없으면 설치·백그라운드 실행)
 #   → Work Key → DeskClaw.app 설치·설정 → 버스 접속 확인.
 # 이미 있는 버스에 이 맥을 손(노드)으로 붙이기:
-#   curl -fsSL …/setup.sh | bash -s -- --bus 100.64.0.10:4000 --token <OAH_SECRET>
+#   curl -fsSL …/setup.sh | OAH_SECRET=<토큰> bash -s -- --bus 100.64.0.10:4000
 #
-# 옵션: --bus HOST:PORT  --token SECRET  --name AGENT_NAME  --work-key WK-…
+# 옵션: --bus HOST:PORT|https://HOST  --token-file PATH  --name AGENT_NAME  --work-key WK-…
+#       토큰은 OAH_SECRET 환경변수나 --token-file 로 — --token SECRET 도 되지만 셸 기록·ps 에 남는다.
 #       --no-plugin (Claude Code 플러그인 건너뛰기)
 # 남는 수동 단계는 macOS 권한(손쉬운 사용·화면 기록) 스위치 하나 — 앱이 처음 실행될 때 안내한다.
 set -euo pipefail
@@ -19,11 +20,13 @@ SERVER_URL="https://dureclaw.baryon.ai/server"
 CONFIG_DIR="$HOME/Library/Application Support/deskclaw"
 CONFIG="$CONFIG_DIR/config.json"
 
-BUS="" TOKEN="" NAME="" WK="" PLUGIN=1
+BUS="" TOKEN="${OAH_SECRET:-}" NAME="" WK="" PLUGIN=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --bus) BUS="$2"; shift 2 ;;
     --token) TOKEN="$2"; shift 2 ;;
+    --token-file) [ -r "$2" ] || { echo "토큰 파일을 읽을 수 없습니다: $2" >&2; exit 2; }
+                  TOKEN="$(tr -d '[:space:]' < "$2")"; shift 2 ;;
     --name) NAME="$2"; shift 2 ;;
     --work-key) WK="$2"; shift 2 ;;
     --no-plugin) PLUGIN=0; shift ;;
@@ -58,7 +61,9 @@ fi
 
 # ── 2. DureClaw 버스 ─────────────────────────────────────────────────────────
 step "2/5 DureClaw 버스"
-health() { curl -fsS -m 3 "http://$1/api/health" >/dev/null 2>&1; }
+# HOST:PORT → http://HOST:PORT; an https:// bus is used as-is (the node then connects over wss://)
+api_of() { case "$1" in http://*|https://*) printf '%s' "${1%/}" ;; *) printf 'http://%s' "$1" ;; esac; }
+health() { curl -fsS -m 3 "$(api_of "$1")/api/health" >/dev/null 2>&1; }
 if [ -n "$BUS" ]; then
   health "$BUS" || die "버스 $BUS 에 연결할 수 없습니다 (주소·포트·네트워크 확인)"
   ok "기존 버스 사용: $BUS"
@@ -76,31 +81,46 @@ else
   fi
   if [ -z "$TOKEN" ]; then
     SECRET_FILE="${OAH_DATA_DIR:-$HOME/.oah-server/data}/server.secret"
-    [ -r "$SECRET_FILE" ] || die "버스 토큰을 찾지 못했습니다 ($SECRET_FILE) — --token 으로 지정하세요"
+    [ -r "$SECRET_FILE" ] || die "버스 토큰을 찾지 못했습니다 ($SECRET_FILE) — OAH_SECRET 이나 --token-file 로 지정하세요"
     TOKEN="$(tr -d '[:space:]' < "$SECRET_FILE")"
   fi
 fi
-[ -n "$TOKEN" ] || die "버스 토큰이 필요합니다: --token <OAH_SECRET>"
-AUTH="Authorization: Bearer $TOKEN"
-curl -fsS -m 5 -H "$AUTH" "http://$BUS/api/presence" >/dev/null 2>&1 || die "버스 토큰이 맞지 않습니다 (401)"
+[ -n "$TOKEN" ] || die "버스 토큰이 필요합니다: OAH_SECRET=<토큰> 또는 --token-file <파일>"
+API="$(api_of "$BUS")"
+case "$API" in http://127.*|http://localhost*|http://100.*|https://*) ;;
+  *) warn "버스 토큰이 암호화 없이 전송됩니다 ($API) — https:// 버스나 Tailscale 주소를 쓰세요" ;; esac
+# the header goes through a file, not curl's argv, so the token never shows up in ps
+(umask 077; printf 'Authorization: Bearer %s\n' "$TOKEN" > "$TMP/auth")
+AUTH="@$TMP/auth"
+curl -fsS -m 5 -H "$AUTH" "$API/api/presence" >/dev/null 2>&1 || die "버스 토큰이 맞지 않습니다 (401)"
 ok "토큰 확인"
 
 # ── 3. Work Key ─────────────────────────────────────────────────────────────
 step "3/5 Work Key"
 wk_of() { sed -n 's/.*"work_key" *: *"\([^"]*\)".*/\1/p' | head -1; }
 if [ -z "$WK" ]; then
-  WK="$(curl -fsS -m 5 -H "$AUTH" "http://$BUS/api/work-keys/latest" 2>/dev/null | wk_of || true)"
+  WK="$(curl -fsS -m 5 -H "$AUTH" "$API/api/work-keys/latest" 2>/dev/null | wk_of || true)"
 fi
 if [ -z "$WK" ]; then
   WK="$(curl -fsS -m 5 -X POST -H "$AUTH" -H 'Content-Type: application/json' -d '{"goal":"deskclaw"}' \
-        "http://$BUS/api/work-keys" | wk_of)"
+        "$API/api/work-keys" | wk_of)"
 fi
 [ -n "$WK" ] || die "Work Key를 만들지 못했습니다"
 ok "$WK"
 
 # ── 4. DeskClaw.app ─────────────────────────────────────────────────────────
 step "4/5 DeskClaw.app"
-if curl -fsSL -m 120 "$APP_ZIP_URL" -o "$TMP/app.zip" 2>/dev/null && ditto -x -k "$TMP/app.zip" "$TMP/app" 2>/dev/null \
+# verify against the published .sha256 (catches a corrupted or swapped download; it comes from the
+# same release, so it can't vouch for a compromised release itself)
+verify_zip() {
+  curl -fsSL -m 30 "$APP_ZIP_URL.sha256" -o "$TMP/app.zip.sha256" 2>/dev/null \
+    || { warn "릴리스에 체크섬(.sha256)이 없어 검증을 건너뜁니다"; return 0; }
+  want="$(awk '{print $1; exit}' "$TMP/app.zip.sha256")"
+  got="$(shasum -a 256 "$TMP/app.zip" | awk '{print $1}')"
+  [ -n "$want" ] && [ "$want" = "$got" ] || die "앱 체크섬이 맞지 않습니다 (받은 $got, 기대 $want) — 설치 중단"
+  ok "체크섬 확인"
+}
+if curl -fsSL -m 120 "$APP_ZIP_URL" -o "$TMP/app.zip" 2>/dev/null && verify_zip && ditto -x -k "$TMP/app.zip" "$TMP/app" 2>/dev/null \
    && [ -d "$TMP/app/DeskClaw.app" ]; then
   ok "릴리스에서 받음"
   SRC_APP="$TMP/app/DeskClaw.app"
@@ -125,6 +145,7 @@ ok "$DEST/DeskClaw.app"
 step "5/5 설정하고 연결"
 [ -n "$NAME" ] || NAME="deskclaw@$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
 mkdir -p "$CONFIG_DIR"
+umask 077   # config holds the bus token — never world-readable, not even before the chmod below
 jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 if [ -s "$CONFIG" ] && [ "$(tr -d '[:space:]' < "$CONFIG")" != "{}" ]; then
   for kv in "STATE_SERVER=$BUS" "OAH_SECRET=$TOKEN" "WORK_KEY=$WK" "AGENT_NAME=$NAME"; do
@@ -141,7 +162,7 @@ open "$DEST/DeskClaw.app"
 printf '  버스 접속 대기'
 JOINED=0
 for _ in $(seq 1 40); do
-  if curl -fsS -m 3 -H "$AUTH" "http://$BUS/api/presence" 2>/dev/null | grep -q "\"$NAME\""; then JOINED=1; break; fi
+  if curl -fsS -m 3 -H "$AUTH" "$API/api/presence" 2>/dev/null | grep -q "\"$NAME\""; then JOINED=1; break; fi
   printf '.'; sleep 1
 done
 echo
@@ -160,7 +181,7 @@ cat <<EOF
     "$NAME 에서 실행 중인 앱 목록 보여줘"
     "카톡에서 답장해야 할 방만 골라줘"
 
- 버스  : http://$BUS   (대시보드)
+ 버스  : $API   (대시보드)
  노드  : $NAME   ·   Work Key: $WK
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 EOF

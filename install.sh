@@ -25,6 +25,18 @@ asset="deskclaw-${goos}-${goarch}${ext}"
 url="https://github.com/${REPO}/releases/latest/download/${asset}"
 echo "deskclaw: downloading ${asset} ..."
 curl -fsSL "$url" -o deskclaw${ext}
+# verify against the release's SHA256SUMS (from `make all`) when it's published
+if sums=$(curl -fsSL "https://github.com/${REPO}/releases/latest/download/SHA256SUMS" 2>/dev/null); then
+  want=$(printf '%s\n' "$sums" | awk -v a="$asset" '$2 == a || $2 == "*"a {print $1}')
+  if command -v sha256sum >/dev/null 2>&1; then got=$(sha256sum deskclaw${ext} | awk '{print $1}')
+  else got=$(shasum -a 256 deskclaw${ext} | awk '{print $1}'); fi
+  if [ -z "$want" ] || [ "$want" != "$got" ]; then
+    rm -f deskclaw${ext}; echo "✗ checksum mismatch for ${asset} (got $got, want ${want:-none}) — aborted"; exit 1
+  fi
+  echo "✓ checksum ok"
+else
+  echo "! no SHA256SUMS in the release — checksum not verified"
+fi
 chmod +x deskclaw${ext} 2>/dev/null || true
 echo "✓ saved ./deskclaw${ext}"
 echo "  run: STATE_SERVER=<bus:4000> OAH_SECRET=<token> WORK_KEY=<WK> AGENT_NAME=deskclaw@\$(hostname) ./deskclaw${ext}"

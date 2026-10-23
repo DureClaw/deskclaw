@@ -24,6 +24,7 @@ let fields: [(String, String, Bool, String)] = [
     ("Brain URL", "BRAIN_URL", false, "http://master:4111"),
     ("Brain 토큰", "BRAIN_TOKEN", true, ""),
     ("항상 허용 어댑터", "DESK_ALLOW_CONFIRM", false, "비워두면 매번 묻기 (예: KAKAO)"),
+    ("허용 동작", "DESK_ALLOW_VERBS", false, "비워두면 전부 (예: SCREENSHOT,AX,KAKAO)"),
     ("Jev 키 (선택)", "TYPESAFE_API_KEY", true, "카카오 분류용"),
 ]
 
@@ -104,16 +105,16 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             openSettings()  // first run
         } else {
             startNode()
-            if !AXIsProcessTrusted() {  // fresh install (e.g. setup.sh): ask for permissions right away
+            if !AXIsProcessTrusted() || !CGPreflightScreenCaptureAccess() {  // fresh install: ask right away
                 DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { self.checkPermissions() }
             }
         }
     }
 
-    /// After pointing the person at System Settings, notice when Accessibility is switched on.
+    /// After pointing the person at System Settings, notice when both permissions are on.
     func watchPermission() {
         Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { t in
-            if AXIsProcessTrusted() {
+            if AXIsProcessTrusted() && CGPreflightScreenCaptureAccess() {
                 t.invalidate()
                 self.notify("권한 허용됨 ✅", "이제 화면을 읽고 조작할 수 있습니다.")
                 self.restartNode()
@@ -341,7 +342,12 @@ final class App: NSObject, NSApplicationDelegate, NSWindowDelegate {
             "시스템 설정 › 개인정보 보호 및 보안 에서 DeskClaw를 켜 주세요. 켠 뒤에는 노드를 재시작합니다."
         NSApp.activate(ignoringOtherApps: true)
         a.runModal()
-        if ax && screen { restartNode() } else if !ax { watchPermission() }
+        if !screen {  // macOS shows its own prompt only once — after that, open the pane directly
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
+        } else if !ax {
+            NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+        }
+        if ax && screen { restartNode() } else { watchPermission() }
     }
 
     @objc func openLog() { NSWorkspace.shared.open(logURL) }

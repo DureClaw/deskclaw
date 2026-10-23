@@ -42,14 +42,15 @@ curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh | b
 **다른 맥을 손으로 붙일 때** — 버스가 이미 다른 곳(예: 사무실 맥)에 있으면, 붙일 맥에서:
 
 ```bash
+read -rs OAH_SECRET && export OAH_SECRET     # 버스 토큰 붙여넣기 (화면·셸 기록에 안 남음)
 curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh \
-  | bash -s -- --bus 100.64.0.10:4000 --token <버스 토큰> --no-plugin
+  | bash -s -- --bus 100.64.0.10:4000 --no-plugin
 ```
 
 | 옵션 | 뜻 |
 |---|---|
-| `--bus HOST:PORT` | 기존 버스 주소 (없으면 이 맥에 버스를 띄움) |
-| `--token SECRET` | 버스 토큰 (이 맥에 버스가 있으면 자동으로 읽음) |
+| `--bus HOST:PORT` | 기존 버스 주소 (없으면 이 맥에 버스를 띄움). TLS 버스면 `https://HOST` |
+| `OAH_SECRET` 환경변수 / `--token-file 파일` | 버스 토큰 (이 맥에 버스가 있으면 자동으로 읽음). `--token SECRET`도 되지만 셸 기록·`ps`에 남습니다 |
 | `--name 이름` | 노드 이름 (기본 `deskclaw@컴퓨터이름`) |
 | `--work-key WK-…` | 쓸 Work Key (기본: 버스의 최근 키, 없으면 새로 만듦) |
 | `--no-plugin` | Claude Code 플러그인 설치 건너뛰기 (손 역할만 하는 맥) |
