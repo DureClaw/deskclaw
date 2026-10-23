@@ -40,7 +40,8 @@ app:
 	for b in DeskClaw axhelper deskclaw-node; do lipo -create $(TMP)/$$b-arm64 $(TMP)/$$b-x86_64 -output $(MACOS)/$$b; done
 	codesign --force --deep -s "$(SIGN)" $(APP)
 	rm -rf $(TMP)
-	cd $(DIST) && rm -f DeskClaw-macos.zip && ditto -c -k --keepParent DeskClaw.app DeskClaw-macos.zip
+	cd $(DIST) && rm -f DeskClaw-macos.zip && ditto -c -k --keepParent DeskClaw.app DeskClaw-macos.zip \
+	  && shasum -a 256 DeskClaw-macos.zip > DeskClaw-macos.zip.sha256   # setup.sh verifies it — publish both
 	@echo "→ $(APP)  ($(DIST)/DeskClaw-macos.zip)"
 
 # regenerate app/DeskClaw.icns from app/icon.swift

@@ -6,6 +6,12 @@
 //
 //	DESK_ALLOW_VERBS=SCREENSHOT,AX,KAKAO   only these verbs run (empty = all, the default)
 //	DESK_ALLOW_SHELL=1                     allow driving terminals / script hosts (default: refused)
+//	DESK_ALLOW_FROM=orchestrator,…         only tasks from these senders run (empty = any)
+//	DESK_ACCEPT_BROADCAST=1                let un-addressed / "broadcast" tasks act (default: listing only)
+//
+// A task must name this node in "to" to act on the desktop, so one mis-addressed or broadcast
+// task doesn't run on every desktop in the work key. "from" is what the sender says it is: the
+// bus may not verify it, so DESK_ALLOW_FROM narrows honest mistakes more than a hostile sender.
 //
 // The shell guard refuses [LAUNCH] of a terminal, script or executable file (or ssh:// etc.),
 // [AX] press/set into a terminal, and — on macOS — [TYPE]/[KEY] while a terminal is frontmost.
@@ -16,12 +22,69 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
 )
+
+// broadcastSafe: verbs an un-addressed task may still run — they only list, touch nothing.
+// No verb means a natural-language task for the brain, which answers but doesn't act here.
+var broadcastSafe = []string{"", "[PLUGINS]", "[APPS]", "[MACROS]"}
+
+// senderGuard returns a refusal when this task's sender or addressing isn't accepted here.
+func senderGuard(from, to, instr string) string {
+	if allow := splitCSV(os.Getenv("DESK_ALLOW_FROM")); len(allow) > 0 && !slices.Contains(allow, from) {
+		return fmt.Sprintf("task from %q refused — not in DESK_ALLOW_FROM on this node", from)
+	}
+	verb, _ := splitVerb(strings.TrimSpace(instr))
+	if to != agentName && os.Getenv("DESK_ACCEPT_BROADCAST") != "1" && !slices.Contains(broadcastSafe, verb) {
+		return fmt.Sprintf("%s refused — task isn't addressed to this node (to=%q); send it with to=%q", verb, to, agentName)
+	}
+	return ""
+}
+
+// busSocketURL: STATE_SERVER is host:port (ws://) or a full ws:// / wss:// URL; https:// → wss://.
+func busSocketURL() string {
+	s := strings.TrimRight(stateServer, "/")
+	switch {
+	case strings.HasPrefix(s, "ws://"), strings.HasPrefix(s, "wss://"):
+		return s
+	case strings.HasPrefix(s, "https://"):
+		return "wss://" + strings.TrimPrefix(s, "https://")
+	case strings.HasPrefix(s, "http://"):
+		return "ws://" + strings.TrimPrefix(s, "http://")
+	}
+	return "ws://" + s
+}
+
+// plaintextTokenWarning: the token rides in the socket URL, so over plain ws:// to anything but
+// this machine or the tailnet (WireGuard-encrypted) it can be sniffed — and it controls the desktop.
+func plaintextTokenWarning() string {
+	u := busSocketURL()
+	if secret == "" || !strings.HasPrefix(u, "ws://") {
+		return ""
+	}
+	host := strings.TrimPrefix(u, "ws://")
+	if i := strings.IndexAny(host, "/"); i >= 0 {
+		host = host[:i]
+	}
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	if host == "localhost" || strings.HasSuffix(host, ".ts.net") {
+		return ""
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		_, tailnet, _ := net.ParseCIDR("100.64.0.0/10")
+		if ip.IsLoopback() || tailnet.Contains(ip) {
+			return ""
+		}
+	}
+	return "bus token is sent unencrypted (ws://" + host + ") — use wss:// (STATE_SERVER=wss://…) or a Tailscale address"
+}
 
 // verbAllowed: DESK_ALLOW_VERBS empty → everything; natural-language tasks (no verb) only go to
 // the brain and never act locally, so they always pass.

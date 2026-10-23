@@ -243,6 +243,11 @@ one `[LAUNCH] Terminal` + `[TYPE]` away from running commands. Two node-side con
   terminal / script host / script or executable file / `ssh://`, `[AX] press|set` into a
   terminal, and on macOS `[TYPE]` / `[KEY]` while a terminal is frontmost. Defense in depth,
   not a sandbox: an IDE's built-in terminal isn't recognised.
+- **Addressing:** a task acts on the desktop only when its `to` names this node — an
+  un-addressed or `broadcast` task gets listings (`[APPS]`, `[MACROS]`, `[PLUGINS]`) and nothing
+  else, so one mis-addressed task doesn't run on every desktop (`DESK_ACCEPT_BROADCAST=1` to
+  allow). `DESK_ALLOW_FROM` limits senders — `from` is self-reported, so it stops mistakes more
+  than a hostile client holding the token.
 
 ## Plugins — any external CLI as a verb
 
@@ -331,7 +336,8 @@ and connected; only the macOS permission toggle is left to you):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/DureClaw/deskclaw/main/setup.sh | bash
-# join an existing bus instead:  … | bash -s -- --bus HOST:4000 --token <OAH_SECRET> --no-plugin
+# join an existing bus instead:  … | OAH_SECRET=<token> bash -s -- --bus HOST:4000 --no-plugin
+#   (or --token-file PATH; an https:// bus → the node connects over wss://)
 ```
 
 **CLI node only** — prebuilt — one line, auto-detects your OS/CPU (macOS · Windows · Linux-stub):
@@ -358,7 +364,7 @@ STATE_SERVER=<bus-host:4000> OAH_SECRET=<token> WORK_KEY=<WK> \
 
 | Env | Meaning |
 |-----|---------|
-| `STATE_SERVER` / `OAH_SECRET` / `WORK_KEY` | bus `host:port` · bearer token · session key |
+| `STATE_SERVER` / `OAH_SECRET` / `WORK_KEY` | bus `host:port` (or `wss://…` / `https://…` for TLS — the token rides in the socket URL, so use TLS or Tailscale off this machine) · bearer token · session key |
 | `AGENT_NAME` / `AGENT_ROLE` / `CAPABILITIES` | fleet identity |
 | `BRAIN_URL` / `BRAIN_TOKEN` | master brain endpoint — keyless LLM for natural-language tasks |
 | `DESK_SHOT_DIR` | where screenshots are saved (default: temp dir) |
@@ -370,6 +376,8 @@ STATE_SERVER=<bus-host:4000> OAH_SECRET=<token> WORK_KEY=<WK> \
 | `DESK_ALLOW_CONFIRM` | adapters allowed to act for real, e.g. `KAKAO` (enables `[KAKAO] send … --yes`) |
 | `DESK_ALLOW_VERBS` | only these verbs run, e.g. `SCREENSHOT,AX,KAKAO` (empty = all) |
 | `DESK_ALLOW_SHELL` | `1` = let the master drive terminals / scripts (shell guard off) |
+| `DESK_ALLOW_FROM` | only tasks from these senders run, e.g. `orchestrator` (empty = any; `from` is self-reported) |
+| `DESK_ACCEPT_BROADCAST` | `1` = un-addressed / `broadcast` tasks may act (default: only listings; acting needs `to=<this node>`) |
 | `DESK_OVERLAY` | `0` disables the on-screen "computer use running" indicator |
 | `DESK_VISUAL` | `0` keeps the indicator but skips the virtual cursor / candidate highlights |
 | `DESK_WINSTACK` | `0` = don't close windows a job opened (window stack off) |

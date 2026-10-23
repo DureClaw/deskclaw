@@ -64,6 +64,9 @@ func main() {
 		maxOutput = 4000
 	}
 	log.Printf("[deskclaw] %s (role=%s, os=%s) → bus %s work:%s", agentName, agentRole, guiOS(), stateServer, workKey)
+	if w := plaintextTokenWarning(); w != "" {
+		log.Printf("[deskclaw] ⚠️  %s", w)
+	}
 	if axSupported() {
 		caps = append(caps, "ax")
 	}
@@ -89,9 +92,9 @@ func main() {
 }
 
 func run() error {
-	url := fmt.Sprintf("ws://%s/socket/websocket?vsn=2.0.0", stateServer)
+	url := busSocketURL() + "/socket/websocket?vsn=2.0.0"
 	if secret != "" {
-		url += "&token=" + secret
+		url += "&token=" + secret // Phoenix reads connect params from the query
 	}
 	c, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
@@ -170,7 +173,12 @@ func handle(c *websocket.Conn, p taskPayload) {
 	}
 	log.Printf("[deskclaw] task %s: %.70s", p.TaskID, instr)
 	uiEmit("task", map[string]any{"id": p.TaskID, "from": from, "text": clip(instr, 300)})
-	out, code := runTask(instr)
+	out, code := "", 0
+	if refusal := senderGuard(from, p.To, instr); refusal != "" {
+		out, code = refusal, 1
+	} else {
+		out, code = runTask(instr)
+	}
 	status := "done"
 	if code != 0 {
 		status = "blocked"
