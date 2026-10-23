@@ -191,6 +191,9 @@ func handle(c *websocket.Conn, p taskPayload) {
 func runTask(instr string) (string, int) {
 	t := strings.TrimSpace(instr)
 	verb, rest := splitVerb(t)
+	if !verbAllowed(verb) {
+		return verbRefused(verb), 1
+	}
 	if verb == "[SCREENSHOT]" {
 		overlayDrop() // keep the indicator out of the image the master's vision reads
 	} else if drivesGUI(verb, rest) && !strings.Contains(rest, "--no-overlay") {
@@ -206,6 +209,9 @@ func runTask(instr string) (string, int) {
 		name := strings.TrimSpace(rest)
 		if name == "" {
 			return "record needs a name: [RECORD] <macro>", 1
+		}
+		if err := validMacroName(name); err != nil {
+			return err.Error(), 1
 		}
 		startRecording(name)
 		return "● recording macro " + name + " — following actions are captured; [ENDREC] to save", 0
@@ -271,7 +277,14 @@ func execAndRecord(verb, rest string, recordable bool) (string, int) {
 }
 
 // execVerb runs ONE GUI action — shared by live handling and deterministic macro replay.
+// The policy is checked here too, so a macro recorded under a looser policy can't replay past it.
 func execVerb(verb, rest string) (string, int) {
+	if !verbAllowed(verb) {
+		return verbRefused(verb), 1
+	}
+	if refusal := shellGuard(verb, rest); refusal != "" {
+		return refusal, 1
+	}
 	switch verb {
 	case "[LAUNCH]":
 		app := strings.TrimSpace(rest)

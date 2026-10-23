@@ -229,7 +229,20 @@ set, otherwise rules. KakaoTalk only exposes windows while frontmost, so it come
 front during a command. Its terms restrict automation — no bulk sends or tight polling.
 
 **Confirm guard:** an adapter's confirm flag (`--yes`) acts on the real world, so it's
-refused unless the **node** opts in with `DESK_ALLOW_CONFIRM=KAKAO` — a remote master can't.
+refused unless the **node** opts in with `DESK_ALLOW_CONFIRM=KAKAO` or the person at the
+machine approves it. It guards the adapter verb only — a master can still do the same step by
+step with `[AX]` / `[TYPE]` / `[KEY]`. See **Node policy** below to actually prevent that.
+
+**Node policy:** everything on the bus with the token + work key can drive this desktop, and
+the master is an LLM reading untrusted text (chat messages, web pages) — a prompt injection is
+one `[LAUNCH] Terminal` + `[TYPE]` away from running commands. Two node-side controls:
+
+- `DESK_ALLOW_VERBS=SCREENSHOT,AX,KAKAO` — only these verbs run (empty = all). This is the
+  hard boundary; also enforced on `[RUN]` macro steps.
+- **Shell guard** (on by default, `DESK_ALLOW_SHELL=1` turns it off) — refuses `[LAUNCH]` of a
+  terminal / script host / script or executable file / `ssh://`, `[AX] press|set` into a
+  terminal, and on macOS `[TYPE]` / `[KEY]` while a terminal is frontmost. Defense in depth,
+  not a sandbox: an IDE's built-in terminal isn't recognised.
 
 ## Plugins — any external CLI as a verb
 
@@ -355,6 +368,8 @@ STATE_SERVER=<bus-host:4000> OAH_SECRET=<token> WORK_KEY=<WK> \
 | `DESK_AX_HELPER` | use a prebuilt axhelper binary instead of compiling the embedded one |
 | `DESK_MAX_OUTPUT` | max chars of a task result sent back to the bus (default 4000) |
 | `DESK_ALLOW_CONFIRM` | adapters allowed to act for real, e.g. `KAKAO` (enables `[KAKAO] send … --yes`) |
+| `DESK_ALLOW_VERBS` | only these verbs run, e.g. `SCREENSHOT,AX,KAKAO` (empty = all) |
+| `DESK_ALLOW_SHELL` | `1` = let the master drive terminals / scripts (shell guard off) |
 | `DESK_OVERLAY` | `0` disables the on-screen "computer use running" indicator |
 | `DESK_VISUAL` | `0` keeps the indicator but skips the virtual cursor / candidate highlights |
 | `DESK_WINSTACK` | `0` = don't close windows a job opened (window stack off) |

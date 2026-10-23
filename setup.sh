@@ -125,6 +125,7 @@ ok "$DEST/DeskClaw.app"
 step "5/5 설정하고 연결"
 [ -n "$NAME" ] || NAME="deskclaw@$(scutil --get LocalHostName 2>/dev/null || hostname -s)"
 mkdir -p "$CONFIG_DIR"
+umask 077   # config holds the bus token — never world-readable, not even before the chmod below
 jstr() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 if [ -s "$CONFIG" ] && [ "$(tr -d '[:space:]' < "$CONFIG")" != "{}" ]; then
   for kv in "STATE_SERVER=$BUS" "OAH_SECRET=$TOKEN" "WORK_KEY=$WK" "AGENT_NAME=$NAME"; do

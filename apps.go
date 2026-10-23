@@ -10,7 +10,9 @@
 //
 // Confirm guard: an arg equal to the adapter's confirmFlag (e.g. --yes on a send) acts on
 // the real world, so it is refused unless the NODE opts in: DESK_ALLOW_CONFIRM=KAKAO,… or the
-// person at the machine approves it in the DeskClaw app (ui.go). A remote master can't.
+// person at the machine approves it in the DeskClaw app (ui.go). It guards the adapter verb
+// only: a master can still do the same by hand with [AX] / [CLICK] / [TYPE] / [KEY]. To
+// actually stop that, narrow the node with DESK_ALLOW_VERBS (policy.go).
 package main
 
 import (

@@ -24,6 +24,7 @@ let fields: [(String, String, Bool, String)] = [
     ("Brain URL", "BRAIN_URL", false, "http://master:4111"),
     ("Brain 토큰", "BRAIN_TOKEN", true, ""),
     ("항상 허용 어댑터", "DESK_ALLOW_CONFIRM", false, "비워두면 매번 묻기 (예: KAKAO)"),
+    ("허용 동작", "DESK_ALLOW_VERBS", false, "비워두면 전부 (예: SCREENSHOT,AX,KAKAO)"),
     ("Jev 키 (선택)", "TYPESAFE_API_KEY", true, "카카오 분류용"),
 ]
 
